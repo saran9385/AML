@@ -1,0 +1,2055 @@
+import requests
+import xml.etree.ElementTree as ET
+from flask import jsonify
+from fuzzywuzzy import fuzz
+from openpyxl import load_workbook
+import openpyxl
+from io import BytesIO
+import json
+from datetime import datetime
+import xlrd
+import re
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+import time
+
+current_date = datetime.now().strftime("%Y%m%d")
+# print(current_date)
+
+# File Paths
+file_paths = {
+    "un": f"Sanction/latest/un_{current_date}.xml",
+    "ofac": f"Sanction/latest/ofac_consolidated_{current_date}.xml",
+    "eu": f"Sanction/latest/eu_{current_date}.xml",
+    "uk": f"Sanction/latest/uk_{current_date}.xml",
+    "ofac_sdn": f"Sanction/latest/ofac_sdn_{current_date}.xml",
+    "aus": f"Sanction/latest/au_{current_date}.xlsx",
+    "sebi": "Sanction/prs_ra_sebi (1).xls"
+}
+# Function to fetch XML content
+def fetch_file(file_path):
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            return file.read()
+    except FileNotFoundError:
+        print("Error: Required file is missing.")
+        return None
+# Function to parse XML content
+def parse_xml(content):
+    try:
+        return ET.fromstring(content) if content else None
+    except ET.ParseError:
+        return None
+
+# Function to load Excel workbook
+def fetch_excel_file(file_path):
+    try:
+        return openpyxl.load_workbook(file_path, read_only=True)
+    except FileNotFoundError:
+        return None
+# Main function to fetch and process files
+def fetch_and_search(search_name=None, threshold=80, search_country=None, search_dob=None, search_address=None, search_type=None, search_number=None, search_email=None):
+    threshold = int(threshold)
+    # print(f"Threshold: {threshold}")
+    start_time = time.time()  # Record start time
+
+    # Fetch files concurrently
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        xml_futures = {key: executor.submit(fetch_file, path) for key, path in file_paths.items() if key not in ["aus", "sebi"]}
+        excel_future = executor.submit(fetch_excel_file, file_paths["aus"])
+
+        # Parse XML concurrently
+        xml_results = {key: executor.submit(parse_xml, future.result()) for key, future in xml_futures.items()}
+        workbook = excel_future.result()
+
+    # Extract parsed XML
+    parsed_xml = {key: future.result() for key, future in xml_results.items()}
+    sheet = workbook.active if workbook else None
+
+    # XML Roots
+    euroot = parsed_xml.get("eu")
+    unroot = parsed_xml.get("un")
+    ofacroot = parsed_xml.get("ofac")
+    OFAC_SDN_root = parsed_xml.get("ofac_sdn")
+    ukroot = parsed_xml.get("uk")
+
+    namespace = {'ns': 'http://schemas.hmtreasury.gov.uk/ofsi/consolidatedlist'}
+    ns = {'ns': 'http://eu.europa.ec/fpi/fsd/export'}
+
+    # Search results
+    matching_results = []
+    india_results = []
+    EU_results = []
+
+    dup = []
+
+
+    if(search_type == "INDIVIDUAL"):
+        # for SEBI 
+        try:
+            # load the excel sheet
+            wb=xlrd.open_workbook(file_paths["sebi"])
+            sheet_sebi=wb.sheet_by_index(0)
+            # extract the data
+            data=[]
+            for rowidx in range(1,sheet_sebi.nrows):
+                row=sheet_sebi.row(rowidx)
+                data.append([cell.value for cell in row])  # Extract row data into list
+            # extraxt the headers
+            headers=data[0]
+            rows=data[1:]
+            # perfor search if search name is provided
+            if not search_dob:
+                if search_name and not search_address and not search_country and not search_number:
+                    for row in rows:
+                        name=row[2]
+                        if  search_name and name:
+                            score=fuzz.partial_ratio(search_name.lower(),name.lower())
+                            if score>=threshold:
+                                india_results.append({
+                                    
+                                    "Name":name,
+                                    "order date":row[0],
+                                    "Name_score":score,
+                                    "Order particulars":row[1],
+                                    "PAN":row[3],
+                                    'NSE Circular no':row[6],
+                                    'Nationality':'India',
+                                    "Source":"SEBI-GOV"
+                                })
+                elif search_name and search_number:
+                    # Perform search when both name and number are provided
+                    pan_list = []
+                    for row in rows:
+                        if row[3] and row[3] != 'Not Provided':  # Skip 'Not Provided'
+                            pan_list.append(row[3])
+                    number_matched=False
+
+                    for row in rows:
+                        name = row[2]
+                        pan = row[3]
+                        if name and pan:
+                            score = fuzz.partial_ratio(search_name.lower(), name.lower())
+                            number_matched = search_number in pan
+                            if score >= threshold and number_matched:
+                                india_results.append({
+                                    
+                                    "Name": name,
+                                    "order date": row[0],
+                                    "Name_score": score,
+                                    "Order particulars": row[1],
+                                    "PAN": row[3],
+                                    'NSE Circular no': row[6],
+                                    'Nationality': 'India',
+                                    "Source": "SEBI-GOV"
+                                })
+
+                else: 
+                    for row in rows:
+                        name=row[2]
+                        if search_address=="India" or search_country=="India" and search_name or search_number:
+                            if name:
+                                score=fuzz.partial_ratio(search_name.lower(),name.lower())
+                                if score>=threshold:
+                                    india_results.append({
+                                        
+                                        "Name":name,
+                                        "order date":row[0],
+                                        "Name_score":score,
+                                        "Order particulars":row[1],
+                                        "PAN":row[3],
+                                        "NSE Circular no":row[6],
+                                        'Nationality':"India",
+                                        "Source":"SEBI-GOV"
+
+                                    })
+
+        except Exception as e:
+            print(f"Error processing SEBI data:{e}")
+        try:
+            for sdn_entry in OFAC_SDN_root.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}sdnEntry"):
+                sdn_type_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}sdnType")
+                if sdn_type_element is not None and sdn_type_element.text.lower() == search_type.lower():
+                    first_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                    last_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                    aka_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")
+                    nationality_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}country")
+                    Nationality = [add.text for add in nationality_elements] if nationality_elements else []
+                    dob_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")
+                    dob_values = []
+
+                    for dob_element in dob_elements:
+                        if dob_element.text:
+                            text = dob_element.text.strip()
+                            parts = text.split()
+                            
+                            if "to" in text:
+                                # Date range ( yyyy to yyyy)
+                                dob_values.append(text)
+                            elif len(parts) == 1:
+                                # Only year present
+                                dob_values.append(text)
+                            elif len(parts) == 2:
+                                # Month and year present
+                                dob_values.append(text)
+                            elif len(parts) == 3:
+                                # Full date (day, month, year)
+                                dob = datetime.strptime(text, '%d %b %Y').strftime('%d-%m-%Y')
+                                dob_values.append(dob)
+
+
+                    # print(f'dob:{dob_values}')
+
+                    address_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")
+                    address_values=[]
+                    if address_elements:
+                        for address in address_elements:
+                            address_parts=[
+                                address.find(f".//{{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}}{field}").text
+                                for field in ['address1', 'address2', 'address3', 'city', 'country']
+                                if address.find(f".//{{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}}{field}") is not None
+
+                            ]
+                            address_values.append(",".join(filter(None, address_parts)))
+                    # print(dob_values)
+                    # print(f'address:{address_values}')
+                    # print("Nationality_Elements",Nationality_Elements)
+                    names_to_check = []
+                    if first_name_element is not None and first_name_element.text:
+                        names_to_check.append(first_name_element.text)
+                    if last_name_element is not None and last_name_element.text:
+                        names_to_check.append(last_name_element.text)
+                    aka_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")
+                    for aka in aka_elements:
+                        aka_first_name = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                        aka_last_name = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                        if aka_first_name is not None and aka_first_name.text:
+                            names_to_check.append(aka_first_name.text)
+                        if aka_last_name is not None and aka_last_name.text:
+                            names_to_check.append(aka_last_name.text)
+
+                    if search_name is not None:
+                        name_matched = False
+                        name_score = 0
+                        for full_name in names_to_check:
+                            temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                            if temp_score > threshold:
+                                name_matched = True
+                                name_score = temp_score
+                                break
+                    else:
+                        name_matched = False
+
+
+                    passport_number=[]
+                    passport_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}id[{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idType='Passport']/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idNumber")
+                    for passport in passport_elements:
+                        passport_number.append(passport.text)
+                    # print(passport_number)
+                    if search_number:
+                        number_matched=search_number in passport_number
+
+                    email=[]
+                    email_elements=sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}id[{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idType='Email Address']/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idNumber")
+                    for emails in email_elements:
+                        email.append(emails.text)
+                    # print(email)
+                    if search_email:
+                        email_matched=search_email in email
+                        # print(email_matched)
+
+                    
+                    if search_country is not None:
+                        country_matched = False
+                        for nationality in Nationality:
+                            if search_country.lower() == nationality.lower():
+                                country_matched = True
+                                break
+                    else:
+                        country_matched = False
+                    # match DOB
+                    if search_dob:
+                        dob_matched=search_dob in dob_values
+
+                    # match address
+                    if search_address:
+                        address_str=','.join(address_values)
+                        address_matched=search_address in address_str
+
+                     # Covert address list into a single string
+                    #  address_matched=search_address in address_str
+                    
+                     # print(f"Address matched: {address_matched}")
+
+                    def ofacresult():
+                        title_elements = [
+                            title.text if title.text else "NA" 
+                            for title in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}title")
+                            ]
+                        program_elements=[
+                            program.text if program.text else "NA"
+                            for program in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}programList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}program")
+                        ]
+                        placeofBirth_elements = [pob.text for pob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirth")]
+                        place_of_births=", ".join(placeofBirth_elements)
+                        
+                        sdnentry_aliases = []
+                        for aka in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka"):
+                            first_name_elem = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                            last_name_elem = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                            
+                            first_name = first_name_elem.text if first_name_elem is not None else "NA"
+                            last_name = last_name_elem.text if last_name_elem is not None else "NA"
+                            
+                            if first_name != "NA" or last_name != "NA":
+                                sdnentry_aliases.append(f"{first_name} {last_name}")
+                        
+                        aliases_string = ", ".join(sdnentry_aliases)
+                        aliases_string = ", ".join(sdnentry_aliases)
+                        dateOfBirth_elements = [dob.text for dob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")]
+                        date_of_births = ", ".join(dateOfBirth_elements)
+                        nationality_string = ", ".join(Nationality)
+                        address_str=','.join(address_values)
+                    # Nationality_Elements = [add.text for add in sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")]
+                        matching_results.append({
+                                "Name":"".join(names_to_check[:2]),
+                                "Title":title_elements,
+                                "Program":program_elements,
+                                "Alias_name": aliases_string,
+                                "Date_of_Birth": date_of_births,
+                                "Birth_Place": place_of_births,
+                                "Nationality": nationality_string,
+                                "Name_score": name_score,
+                                "Address":address_values,
+                                "Passport_number":passport_number,
+                                "Email":email,
+                                
+                                "Source": "OFAC_SDN"
+                            })
+
+                    def ofacresult1():
+                        title_elements = [
+                            title.text if title.text else "NA" 
+                            for title in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}title")
+                            ]
+                        placeofBirth_elements = [pob.text for pob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirth")]
+                        place_of_births=", ".join(placeofBirth_elements)
+                        
+                        sdnentry_aliases = []
+                        for aka in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka"):
+                            first_name_elem = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                            last_name_elem = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                            
+                            first_name = first_name_elem.text if first_name_elem is not None else "NA"
+                            last_name = last_name_elem.text if last_name_elem is not None else "NA"
+                            
+                            if first_name != "NA" or last_name != "NA":
+                                sdnentry_aliases.append(f"{first_name} {last_name}")
+                        
+                        aliases_string = ", ".join(sdnentry_aliases)
+                        aliases_string = ", ".join(sdnentry_aliases)
+                        dateOfBirth_elements = [dob.text for dob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")]
+                        date_of_births = ", ".join(dateOfBirth_elements)
+                        program_elements=[
+                            program.text if program.text else "NA"
+                            for program in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}programList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}program")
+                        ]
+                        nationality_string = ", ".join(Nationality)
+
+                    # Nationality_Elements = [add.text for add in sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")]
+                        matching_results.append({
+                                "Name":"".join(names_to_check[:2]),
+                                "title":title_elements,
+                                "Program":program_elements,
+                                "Alias_name": aliases_string,
+                                "Date_of_Birth": date_of_births,
+                                "Birth_Place": place_of_births,
+                                "Nationality": nationality_string,
+                                "Address":address_values,
+                                "Passport_number":passport_number,
+                                "Email":email,
+                                "Source": "OFAC_SDN"
+                            })
+                        
+                # Matching conditions based on provided search parameters
+                    if search_name:
+                        if name_matched:
+                            if (
+                                (search_dob and dob_matched or not search_dob) and
+                                (search_address and address_matched or not search_address) and
+                                (search_country and country_matched or not search_country) and
+                                (search_number and number_matched or not search_number) and
+                                (search_email and email_matched or not search_email)
+                            ):
+                                # All provided parameters match
+                                # print("All parameters match")
+                                ofacresult() 
+                    elif not search_name and not search_dob and search_address and not search_number and not search_email :
+                        if address_matched:
+                            # address only
+                            ofacresult1()
+                    elif not search_name and not search_dob and not search_address and search_number and not search_country and not search_email:
+                        if number_matched:
+                            # number only
+                            ofacresult1()
+                    elif search_email:
+                        if email_matched:
+                            # print('matched')
+                            ofacresult1()
+                    
+
+
+
+        except Exception as e:
+            print(f'Error processing OFAC SDN data:{e}')
+            traceback.print_exc() 
+        try:
+
+            for individual in unroot.findall(".//INDIVIDUAL"):
+                first_name_element = individual.find("FIRST_NAME")
+                second_name_element = individual.find("SECOND_NAME")
+                third_name_element = individual.find("THIRD_NAME")
+                alias_name_elements = individual.findall(".//INDIVIDUAL_ALIAS/ALIAS_NAME")
+                dob_elements = individual.findall(".//INDIVIDUAL_DATE_OF_BIRTH/YEAR")
+                dob_years = [dob.text for dob in dob_elements]
+
+
+                address=[]
+                address1=individual.find(".//INDIVIDUAL_ADDRESS/STREET")
+                address2=individual.find(".//INDIVIDUAL_ADDRESS/STATE_PROVINCE")
+                address3=individual.find(".//INDIVIDUAL_ADDRESS/COUNTRY")
+                if address1 is not None and address1.text:
+                    address.append(address1.text)
+                if address2 is not None and address2.text:
+                    address.append(address2.text)
+                if address3 is not None and address3.text:
+                    address.append(address3.text)
+                # print(address)
+
+                passport_number = [] 
+                individual_document = individual.find(".//INDIVIDUAL_DOCUMENT")
+                # Check if the TYPE_OF_DOCUMENT is 'Passport'
+                if individual_document is not None:
+                    document_type = individual_document.find(".//TYPE_OF_DOCUMENT")
+                    if document_type is not None and document_type.text == "Passport":
+                        number_element = individual_document.find(".//NUMBER")
+                        if number_element is not None:
+                            passport_number.append(number_element.text.strip())
+                # print(f'passport{passport_number}')
+                if search_number:
+                    number_matched=search_number in passport_number
+
+                
+                # Check names and aliases
+                names_to_check = []
+                if first_name_element is not None and first_name_element.text:
+                    names_to_check.append(first_name_element.text)
+                if second_name_element is not None and second_name_element.text:
+                    names_to_check.append(second_name_element.text)
+                if third_name_element is not None and third_name_element.text:
+                    names_to_check.append(third_name_element.text)  
+                if alias_name_elements:
+                    for alias_element in alias_name_elements:
+                        if alias_element.text:
+                            names_to_check.append(alias_element.text)
+                
+                # # Debug print to check collected names
+                # # print(f"Names to check: {names_to_check}")
+
+                # # Fuzzy matching for names
+                if search_name is not None:
+                    name_matched = False
+                    name_score = 0
+                    for full_name in names_to_check:
+                        temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                        if search_name.lower() != full_name.lower():
+                            if temp_score >= 80 and temp_score <= 100:
+                                temp_score = temp_score-10
+                        if temp_score > threshold:
+                            name_matched = True
+                            name_score = temp_score
+                            break
+                else:
+                    name_matched = False
+                nationality_elements = [n.text for n in individual.findall(".//NATIONALITY/VALUE")]
+                if search_country is not None:
+                    country_matched = False
+                    for nationality in nationality_elements:
+                        if search_country.lower() == nationality.lower():
+                            country_matched = True
+                            break
+                else:
+                    country_matched = False
+
+                # match DOB
+                if search_dob:
+                    dob_matched=search_dob in dob_years
+
+                # match address
+                address_str = ', '.join(map(str, address))
+                if search_address:
+                    # Covert address list into a single string
+                    address_matched=search_address in address_str
+                    # print(f"Address matched: {address_matched}")
+
+                                        
+                def result():
+                    name_aliases = [alias.text for alias in individual.findall(".//INDIVIDUAL_ALIAS/ALIAS_NAME")]
+                    name_aliases_cleaned = ", ".join([alias for alias in name_aliases if alias is not None])
+                    designation = [d.text for d in individual.findall(".//DESIGNATION/VALUE")]
+                    dob_elements = individual.findall(".//INDIVIDUAL_DATE_OF_BIRTH")
+                    dob = [{"type": dob.find("TYPE_OF_DATE").text, "year": dob.find("YEAR").text} for dob in dob_elements if dob.find("TYPE_OF_DATE") is not None and dob.find("YEAR") is not None]
+                    dob_strings = [f"{entry['type']},  year : {entry['year']}" for entry in dob]
+                    dob_string = ", ".join(dob_strings)
+                    pob = individual.find(".//INDIVIDUAL_PLACE_OF_BIRTH")
+                    city = pob.find("CITY").text if pob.find("CITY") is not None else "N/A"
+                    state_province = pob.find("STATE_PROVINCE").text if pob.find("STATE_PROVINCE") is not None else "N/A"
+                    country = pob.find("COUNTRY").text if pob.find("COUNTRY") is not None else "N/A"
+
+                    matching_results.append({
+                            "Name":"".join(full_name),
+                            "Alias_name": name_aliases_cleaned,
+                            "Designation":designation,
+                            "Date_of_Birth": dob_string,
+                            "Passport_Number":passport_number,
+                            # "Birth City": city,
+                            # "Birth State": state_province,
+                            "Nationality": country,
+                            "Name_score": name_score,
+                            "Address":address_str,
+                            "Birth_Place": f"{city}, {state_province}" if city and state_province else city or state_province,
+                            "Source": "UNSC"
+                        })
+                    # print(matching_results)
+                def result1():
+                    name_aliases = [alias.text for alias in individual.findall(".//INDIVIDUAL_ALIAS/ALIAS_NAME")]
+                    name_aliases_cleaned = ", ".join([alias for alias in name_aliases if alias is not None])
+                    designation = [d.text for d in individual.findall(".//DESIGNATION/VALUE")]
+                    dob_elements = individual.findall(".//INDIVIDUAL_DATE_OF_BIRTH")
+                    dob = [{"type": dob.find("TYPE_OF_DATE").text, "year": dob.find("YEAR").text} for dob in dob_elements if dob.find("TYPE_OF_DATE") is not None and dob.find("YEAR") is not None]
+                    dob_strings = [f"{entry['type']},  year : {entry['year']}" for entry in dob]
+                    dob_string = ", ".join(dob_strings)
+                    pob = individual.find(".//INDIVIDUAL_PLACE_OF_BIRTH")
+                    city = pob.find("CITY").text if pob.find("CITY") is not None else "N/A"
+                    state_province = pob.find("STATE_PROVINCE").text if pob.find("STATE_PROVINCE") is not None else "N/A"
+                    country = pob.find("COUNTRY").text if pob.find("COUNTRY") is not None else "N/A"
+
+                    matching_results.append({
+                            "Name":" ".join(names_to_check),
+                            "Alias_name": name_aliases_cleaned,
+                            "Designation":designation,
+                            "Date_of_Birth": dob_string,
+                            # "Birth City": city,
+                            # "Birth State": state_province,
+                            "Nationality": country,
+                            "Passport_Number":passport_number,
+                            "Address":address_str,
+                            "Birth_Place": f"{city}, {state_province}" if city and state_province else city or state_province,
+                            "Source": "UNSC"
+                        })
+                    
+                # print(f'{search_name} and {name_matched}')
+                # print(f'{search_address} and {address_matched}')
+                # print(f'{search_country} and {country_matched}')
+
+                
+                # Matching conditions based on provided search parameters
+                if search_name:
+                        if name_matched:
+                            if (
+                                (search_dob and dob_matched or not search_dob) and
+                                (search_address and address_matched or not search_address) and
+                                (search_country and country_matched or not search_country) and
+                                (search_number and number_matched or not search_number) and
+                                (search_email and email_matched or not search_email)
+                            ):
+                                # All provided parameters match
+                                # print("All parameters match:unsc")
+                                result() 
+
+                elif not search_name and not search_dob and search_address and not search_number and not search_email :
+                    if address_matched:
+                        # address only
+                        result1()
+                elif not search_name and not search_dob and not search_address and search_number and not search_country and not search_email:
+                    if number_matched:
+                        # number only
+                        result1()
+
+        except Exception as e:
+            print(f'Error processing UNSC data:{e}')
+
+
+        # # fpr OPAC data 
+
+        try:
+            for sdn_entry in ofacroot.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}sdnEntry"):
+                sdn_type_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}sdnType")
+                if sdn_type_element is not None and sdn_type_element.text.lower() == search_type.lower():
+                    first_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                    last_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                    aka_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")
+                    nationality_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}country")
+                    Nationality = [add.text for add in nationality_elements] if nationality_elements else []
+                    dob_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")
+                    dob_values = []
+                    for dob_element in dob_elements:
+                        if dob_element.text:
+                            text = dob_element.text.strip()
+                            parts = text.split()
+                            if len(parts) == 1:
+                                # Only year present
+                                dob_values.append(text)
+                            elif len(parts) == 3:
+                                # Full date (day, month, year)
+                                dob = datetime.strptime(text, '%d %b %Y').strftime('%d-%m-%Y')
+                                dob_values.append(dob)
+                    # print(dob_values)
+                    
+
+                    address_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")
+                    address_values=[]
+                    if address_elements:
+                        for address in address_elements:
+                            address_parts=[
+                                address.find(f".//{{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}}{field}").text
+                                for field in ['address1', 'address2', 'address3', 'city', 'country']
+                                if address.find(f".//{{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}}{field}") is not None
+
+                            ]
+                            address_values.append(", ".join(filter(None, address_parts)))
+
+                    # print("Nationality_Elements",Nationality_Elements)
+                    names_to_check = []
+                    if first_name_element is not None and first_name_element.text:
+                        names_to_check.append(first_name_element.text)
+                    if last_name_element is not None and last_name_element.text:
+                        names_to_check.append(last_name_element.text)
+                    aka_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")
+                    for aka in aka_elements:
+                        aka_first_name = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                        aka_last_name = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                        if aka_first_name is not None and aka_first_name.text:
+                            names_to_check.append(aka_first_name.text)
+                        if aka_last_name is not None and aka_last_name.text:
+                            names_to_check.append(aka_last_name.text)
+                    passport_number=[]
+                    passport_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}id[{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idType='Passport']/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}idNumber")
+                    for passport in passport_elements:
+                        passport_number.append(passport.text)
+                    # print(passport_number)
+                    if search_number:
+                        number_matched=search_number in passport_number
+
+                    if search_name is not None:
+                        name_matched = False
+                        name_score = 0
+                        for full_name in names_to_check:
+                            temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                            if temp_score > threshold:
+                                name_matched = True
+                                name_score = temp_score
+                                break
+                    else:
+                        name_matched = False
+
+
+                    
+                    if search_country is not None:
+                        country_matched = False
+                        for nationality in Nationality:
+                            if search_country.lower() == nationality.lower():
+                                country_matched = True
+                                break
+                    else:
+                        country_matched = False
+                    # match DOB
+                    if search_dob:
+                        dob_matched=search_dob in dob_values
+
+                    # match address
+                    address_str=""
+                    if search_address:
+                        address_str=','.join(address_values)
+                        address_matched=search_address in address_str
+                     # Covert address list into a single string
+                    #  address_str=','.join(Nationality_Elements)
+                    #  address_matched=search_address in address_str
+                    
+                     # print(f"Address matched: {address_matched}")
+                    
+
+
+                    def ofacresult():
+                        placeofBirth_elements = [pob.text for pob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirth")]
+                        place_of_birth=", ".join(placeofBirth_elements)
+                        sdnentry_aliases = [f"{aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName').text} {aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName').text}" for aka in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")]
+                        aliases_string = ", ".join(sdnentry_aliases)
+                        dateOfBirth_elements = [dob.text for dob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")]
+                        date_of_birth=", ".join(dateOfBirth_elements)
+                    # Nationality_Elements = [add.text for add in sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")]
+                        matching_results.append({
+                                "Name":" ".join(names_to_check[:2]),
+                                "Alias_name": aliases_string,
+                                "Date_of_Birth": date_of_birth,
+                                "Birth_Place": place_of_birth,
+                                "Nationality": ", ".join(Nationality),
+                                "Name_score": name_score,
+                                "Address":address_values,
+                                "Passport_number":passport_number,
+                                
+                                "Source": "OFAC"
+                            })
+
+                    def ofacresult1():
+                        placeofBirth_elements = [pob.text for pob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirth")]
+                        place_of_birth=", ".join(placeofBirth_elements)
+                        sdnentry_aliases = [f"{aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName').text} {aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName').text}" for aka in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")]
+                        aliases_string = ", ".join(sdnentry_aliases)
+                        dateOfBirth_elements = [dob.text for dob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")]
+                        date_of_birth=", ".join(dateOfBirth_elements)
+
+                    # Nationality_Elements = [add.text for add in sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")]
+                        matching_results.append({
+                                "Name":" ".join(names_to_check[:2]),
+                                "Alias_name": aliases_string,
+                                "Date_of_Birth": date_of_birth,
+                                "Birth_Place": place_of_birth,
+                                "Nationality": Nationality,
+                                "Address":address_values,
+                                "Passport_number":passport_number,
+                                "Source": "OFAC"
+                            })
+                        
+                # Matching conditions based on provided search parameters
+                    if search_name:
+                        if name_matched:
+                            if (
+                                (search_dob and dob_matched or not search_dob) and
+                                (search_address and address_matched or not search_address) and
+                                (search_country and country_matched or not search_country) and
+                                (search_number and number_matched or not search_number) and
+                                (search_email and email_matched or not search_email)
+                            ):
+                                # All provided parameters match
+                                # print("All parameters match:unsc")
+                                ofacresult() 
+
+                    elif not search_name and not search_dob and search_address and not search_number and not search_email:
+                        if address_matched:
+                            # address only
+                            ofacresult1()
+                    elif not search_name and not search_dob and not search_address and search_number and not search_country and not search_email:
+                        if number_matched:
+                            # number only
+                            ofacresult1()
+            
+
+        except Exception as e:
+            print(f'Error processing OFAC data:{e}')
+
+        try:
+            for row in sheet.iter_rows(min_row=2, values_only=True):  
+                if row[2] and isinstance(row[2], str) and row[2].upper() == search_type:
+                    names_to_check = []
+                    if row[1]:  
+                        names_to_check.append(row[1])
+                    if row[3]: 
+                        names_to_check.append(row[3])
+
+                        
+                    
+                    dob_values = []
+                    if row[4]:  # Check for the DOB
+                        dob_values.append(row[4])
+                    formatted_dob_values = []
+
+                    for dob in dob_values:
+                        # Ensure the value is a string
+                        if isinstance(dob, int):
+                            # Case: If the value is an integer,it as a year
+                            formatted_dob_values.append(str(dob))
+                            continue
+                        elif not isinstance(dob, str):
+                            # Skip non-string
+                            continue
+
+                        dob = dob.strip()
+
+                        # Case 1: year only ("1965")
+                        if re.match(r'^\d{4}$', dob):
+                            formatted_dob_values.append(dob)
+
+                        # Case 2:"Between 1963 to 1968"
+                        elif "between" in dob.lower():
+                            years = re.findall(r'\d{4}', dob)
+                            if len(years) == 2:
+                                start_year, end_year = map(int, years)
+                                formatted_dob_values.extend([str(year) for year in range(start_year, end_year + 1)])
+
+                        # Case 3:"Approximately 1958"
+                        elif "approximately" in dob.lower():
+                            year = re.search(r'\d{4}', dob)
+                            if year:
+                                formatted_dob_values.append(year.group())
+
+                        # Case 4: "01/01/1980"
+                        elif re.match(r'^\d{2}/\d{2}/\d{4}$', dob):
+                            try:
+                                formatted_date = datetime.strptime(dob, '%d/%m/%Y').strftime('%d-%m-%Y')
+                                formatted_dob_values.append(formatted_date)
+                            except ValueError:
+                                continue
+
+                        # Case 5:"a) 1976; b) 1977"
+                        elif re.search(r'[a-zA-Z]\)\s?\d{4}', dob):
+                            years = re.findall(r'\d{4}', dob)
+                            formatted_dob_values.extend(years)
+
+                        # Case 6: "June 1960"
+                        elif re.search(r'^[A-Za-z]+\s\d{4}$', dob):
+                            year = re.search(r'\d{4}', dob)
+                            if year:
+                                formatted_dob_values.append(year.group())
+
+                        # Case 7: "04 Feb. 1965"
+                        elif re.match(r'^\d{2}\s[A-Za-z.]+\s\d{4}$', dob):
+                            try:
+                                formatted_date = datetime.strptime(dob.replace('.', ''), '%d %b %Y').strftime('%d-%m-%Y')
+                                formatted_dob_values.append(formatted_date)
+                            except ValueError:
+                                continue
+                        # Case 8:"a) 11 November 1960"
+                        elif re.match(r'[a-zA-Z]\)\s\d{2}\s[A-Za-z]+\s\d{4}', dob):
+                            # Extract the date portion (e.g., "11 November 1960")
+                            date_part = re.search(r'\d{2}\s[A-Za-z]+\s\d{4}', dob)
+                            if date_part:
+                                try:
+                                    formatted_date = datetime.strptime(date_part.group(), '%d %B %Y').strftime('%d-%m-%Y')
+                                    formatted_dob_values.append(formatted_date)
+                                except ValueError:
+                                    continue
+                        # print(formatted_dob_values)
+
+                    
+                    address_data=[]
+                    if row[7]:
+                        address_parts=row[7]
+                        address_data.append(address_parts)
+
+                    dob_matched = False
+                    if search_dob:
+                        # Check if search_dob and dob_values are not null or empty
+                        if search_dob and formatted_dob_values:
+                            dob_matched = search_dob in formatted_dob_values
+                        else:
+                            dob_matched = False
+                    # Match Address
+                    address_matched = False
+                    if search_address:
+                        # Convert address list into a single string
+                        address_str = ','.join(address_data)  # Use `address_data` here, not `Nationality_Elements`
+                        address_matched = search_address in address_str
+
+
+                    # print(dob_matched)
+                    # print(address_matched)
+                        
+                    # print(f"Name to Check: {names_to_check}")   checking statement
+
+                    if search_name is not None:
+                        name_matched = False
+                        name_score = 0
+                        for full_name in names_to_check:
+                            temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                            if search_name != full_name:
+                                if temp_score >= 80 and temp_score <= 100:
+                                    temp_score = temp_score - 10
+                            if temp_score >= threshold:
+                                name_matched = True
+                                name_score = temp_score
+                                break
+                    else:
+                        name_matched = False
+                    # print('runned')
+
+                    citizen=[]
+                    nationality_elements = row[6]  
+                    citizen.append(nationality_elements)
+                    if search_country is not None:
+                        country_matched=False
+                        for nationality in citizen:
+                            if search_country==nationality:
+                                country_matched=True
+                                break
+                    else:
+                        country_matched = False
+                    # print(f"Nationality: {nationality}") checking stetment
+
+                    def result():
+                        name_type=row[3]
+                        pob=row[5]
+                        
+
+                        dob = row[4]  # Assuming date of birth is in the fourth column (index 3)
+
+                        matching_results.append({
+                            "Name": " ".join(names_to_check[:-1]),
+                            "Name Type":name_type,
+                            "Alias_name": [],  # Assuming no alias name in Excel
+                            "Designation": [],  # Assuming no designation in Excel
+                            "Date_of_Birth": dob,
+                            "Birth_Place": pob,  # Assuming no city information in Excel
+                            "Birth State": "N/A",  # Assuming no state information in Excel
+                            "Nationality": nationality_elements,
+                            "Name_score": name_score,
+                            "Address":address_parts,
+                            "Source": "AUSTRALIA"
+                        })
+
+                    def result1():
+                        name_type=row[3]
+                        pob=row[5]
+                        
+
+                        dob = row[4]  # Assuming date of birth is in the fourth column (index 3)
+
+                        matching_results.append({
+                            "Name": " ".join(names_to_check[:-1]),
+                            "Name Type":name_type,
+                            "Alias_name": [],  # Assuming no alias name in Excel
+                            "Designation": [],  # Assuming no designation in Excel
+                            "Date_of_Birth": dob,
+                            "Birth_Place": pob,  # Assuming no city information in Excel
+                            "Birth State": "N/A",  # Assuming no state information in Excel
+                            "Nationality": nationality_elements,
+                            #"Name Score": name_score,
+                            "Address":address_parts,
+                            "Source": "AUSTRALIA"
+                        })
+
+                    if search_name:
+                        if name_matched:
+                            if (
+                                (search_dob and dob_matched or not search_dob) and
+                                (search_address and address_matched or not search_address) and
+                                (search_country and country_matched or not search_country) and
+                                (search_number and number_matched or not search_number) and
+                                (search_email and email_matched or not search_email)
+                            ):
+                                # All provided parameters match
+                                # print("All parameters match:aus")
+                                result() 
+
+                    elif not search_name and not search_dob and search_address and not search_country and not search_number and not search_email:
+                        # Case 4: Only address is provided  
+                        if address_matched:
+                            result1()
+        except Exception as e:
+            print(f'Error processing Australia data:{e}')
+        try:
+            for individual in ukroot.findall(".//ns:FinancialSanctionsTarget", namespace):
+                group_type = individual.find("ns:GroupTypeDescription", namespace)
+                if group_type is not None and group_type.text.upper()=='INDIVIDUAL':
+                    first_name = individual.find("ns:Name6", namespace)  # Adjust to correct tag if needed
+                    second_name=individual.find("ns:name1",namespace)
+                    third_name=individual.find("ns:name2",namespace)
+                    fourth_name=individual.find("ns:name3",namespace)
+                    alias_name=individual.findall("ns:AliasType",namespace)
+                    # coutry=individual.find("ns:Country",namespace)
+                    address = []
+
+                    for i in range(1, 7):
+                        addr = individual.find(f"ns:Address{i}", namespace)
+                        if addr is not None and addr.text:
+                            address.append(addr.text)
+
+                    # print(address)
+                    dob_data = []
+                    dob = individual.find("ns:Individual_DateOfBirth", namespace)
+                    if dob is not None and dob.text:
+                        dob_value = dob.text
+                        parts = dob_value.split('/')
+
+                        if len(parts) == 3:
+                            # If the day or month is 00, only add the year
+                            if parts[0] == '00' or parts[1] == '00':
+                                dob_data.append(parts[2])
+                            else:
+                                # format as dd-mm-yyyy
+                                formatted_dob = f"{parts[0]}-{parts[1]}-{parts[2]}"
+                                dob_data.append(formatted_dob)
+                        elif len(parts)==2:
+                            # only the moth ad year ,take only uear
+                            dob_data.append(parts[1])
+                        elif len(parts) == 1:
+                            # only the year is present, add only the year
+                            dob_data.append(parts[0])
+                        else:
+                            #  invalid date format
+                            dob_data.append(f'Invalid date format{dob_value}')
+                    # print(dob_data)
+
+                    # print(dob_data)
+
+
+
+                            #check name and aliases  
+                    names_to_check = []
+                    if first_name is not None and first_name.text:
+                        names_to_check.append(first_name.text)
+                    if second_name is not None and second_name.text:
+                        names_to_check.append(second_name.text)
+                    if third_name is not None and third_name.text:
+                        names_to_check.append(third_name.text)
+                    if fourth_name is not None and fourth_name.text:
+                        names_to_check.append(fourth_name.text)
+                    # if coutry is not None and coutry.text:
+                    #     names_to_check.append(coutry.text)
+                    if alias_name:
+                        for alias in alias_name:
+                            if alias.text:
+                                names_to_check.append(alias.text)
+                    
+                    # print to check collected names 
+                    # print(f'names: {names_to_check}')
+
+
+                    # fuzzy matching for names
+                    if search_name is not None:
+                        name_matched=False
+                        name_score=0
+                        for full_name in names_to_check:
+                            temp_score=fuzz.partial_ratio(search_name.lower(),full_name.lower())
+                            # print(f"Comparing '{search_name}' with '{full_name}', score: {temp_score}")
+                            if search_name.lower() != full_name.lower():
+                                if temp_score>=80 and temp_score<=100:
+                                    temp_score=temp_score-10
+                                    # print(f"its a score{temp_score}")
+                            if temp_score>threshold:
+                                name_matched=True
+                                name_score=temp_score
+                                break
+                    else:
+                        name_matched=False
+                    nationality_elements=[n.text for n in individual.findall("ns:Country", namespace)]
+                    # print(f"helle{nationality_elements}")
+                    if search_country:
+                        country_matched = False
+                        for nationality in nationality_elements:
+                            if nationality is not None and search_country.lower() == nationality.lower():
+                                # print('Country matched in loop')
+                                country_matched = True
+                                break
+
+                    else:
+                        country_matched=False
+
+                    if search_dob:
+                        dob_matched=search_dob in dob_data
+                    # match address
+                    address_str=','.join(address)
+                    if search_address:
+                     # Covert address list into a single string
+                     #address_str=','.join(address)
+                        address_matched=search_address in address_str
+                     # print(f"Address matched: {address_matched}")
+                    email = []
+                    email_elements = individual.find("ns:EmailAddress", namespace)
+                    if email_elements is not None and email_elements.text is not None:
+                        emails = email_elements.text.split() 
+                        for part in emails:
+                            clean_email = part.strip("() ")
+                            if "@" in clean_email:  #a valid email structure
+                                email.append(clean_email)
+
+                    # if email:
+                    #     print(f'uk:{email}')
+                    email_matched=False
+                    if search_email:
+                        if search_email in email:
+                            email_matched=True
+
+                    passport_number2 = []
+                    passport_number_elements = individual.find("ns:Individual_PassportNumber", namespace)
+
+                    if passport_number_elements is not None and passport_number_elements.text:
+                        passport_number_text = passport_number_elements.text.strip()
+                        cleaned_passport_number_text = re.sub(r'\(\d+\)', '', passport_number_text)
+                        individual_numbers = cleaned_passport_number_text.split()  # Split by whitespace
+
+                        #  ['D', '001206']
+                        if len(individual_numbers) == 2 and '-' not in individual_numbers[0]:  # Check if it's a split case
+                            passport_number2.append('-'.join(individual_numbers))  
+                        elif len(individual_numbers) == 1:  
+                            passport_number2.append(individual_numbers[0])  
+                        else:
+                            
+                            passport_number2.extend(individual_numbers)
+
+                    # print(passport_number2)
+
+                    # Compare input number with the extracted passport numbers
+                    number_matched = False
+                    if search_number:
+                        if search_number in passport_number2:
+                            number_matched = True
+                                        
+                    
+                    def result():
+                        name_alias=[alias.text for alias in individual.findall("ns:AliasType",namespace)]
+
+                        # second_name_element = individual.find("ns:Name6", namespace)
+                        # second_name = second_name_element.text if second_name_element is not None else "N/A"
+
+                        designation=[d.text for d in individual.findall("ns:Country",namespace)]
+                        pob=individual.find("ns:Individual_TownOfBirth",namespace)
+                        state_province=pob.find("ns:Individual_CountryOfBirth",namespace).text if pob.find(".//ns:Individual_CountryOfBirth",namespace) is not None else "N/A"
+
+
+                        first_name = individual.find("ns:Name6", namespace)
+                        first_name_text = first_name.text if first_name is not None else 'N/A'
+
+                        regime_name=individual.find("ns:RegimeName",namespace)
+                        regime_name_text=regime_name.text if regime_name is not None else 'N/A'
+
+                        dateofbirth=individual.find("ns:Individual_DateOfBirth",namespace)
+                        dateofbirth_text=dateofbirth.text if dateofbirth is not None else 'N/A'
+
+                        
+                        state_province=individual.find("ns:Individual_TownOfBirth",namespace)
+                        state_province_text=state_province.text if state_province is not None else 'N/A'
+
+                        countryof_birth=individual.find("ns:Individual_CountryOfBirth",namespace)
+                        countryof_birth_text=countryof_birth.text if countryof_birth is not None else 'N/A'
+
+                        passport_number=individual.find("ns:Individual_PassportNumber",namespace)
+                        passport_number_text=passport_number.text if passport_number is not None else 'N/A'
+
+                        passport_details=individual.find("ns:Individual_PassportDetails",namespace)
+                        passport_details_text=passport_details.text if passport_details is not None else 'N/A'
+
+                        NInumber=individual.find("ns:Individual_NINumber",namespace)
+                        NInumber_text=NInumber.text if NInumber is not None else 'N/A'
+
+                        NIdetails=individual.find("ns:Individual_NIDetails",namespace)
+                        NIdetails_text=NIdetails.text if NIdetails is not None else 'N/A'
+                        
+
+                        
+                        dup.append({
+                            "FIRST_NAME":first_name_text,
+                            "Name": " ".join([full_name, first_name_text]),
+                            # "Second name":second_name,
+                            "REGINAME":regime_name_text,
+                            "Date_of_Birth":dateofbirth_text,
+                            
+                            "PASSPORT NUMBER":passport_number_text,
+                            "PASSPORT DETAILS":passport_details_text,
+                            "NI_NUMBER":NInumber_text,
+                            "NI_DETAILS":NIdetails_text,
+                            "Address":address_str,
+                            "E-Mail":email,
+
+
+                            "Alias_name": ", ".join(name_alias),
+                            "Birth_Place": f"{state_province_text if state_province_text else '-'}, {countryof_birth_text if countryof_birth_text else '-'}",
+
+                            "birth_country":countryof_birth_text,
+                            "Nationality": ", ".join(d for d in designation if d),
+                            "Name_score":name_score,
+                            "Source":"Uk"
+                            })
+                        # print(matching_results)
+                        # print('result execute')
+
+
+                    def result1():
+                        name_alias=[alias.text for alias in individual.findall("ns:AliasType",namespace)]
+
+                        # second_name_element = individual.find("ns:Name6", namespace)
+                        # second_name = second_name_element.text if second_name_element is not None else "N/A"
+
+                        designation=[d.text for d in individual.findall("ns:Country",namespace)] 
+                        
+                        pob=individual.find("ns:Individual_TownOfBirth",namespace)
+
+                        first_name = individual.find("ns:Name6", namespace)
+                        first_name_text = first_name.text if first_name is not None else 'N/A'
+
+                        regime_name=individual.find("ns:RegimeName",namespace)
+                        regime_name_text=regime_name.text if regime_name is not None else 'N/A'
+
+                        dateofbirth=individual.find("ns:Individual_DateOfBirth",namespace)
+                        dateofbirth_text=dateofbirth.text if dateofbirth is not None else 'N/A'
+
+                        passport_number=individual.find("ns:PassportNumber",namespace)
+                        passport_number_text=passport_number.text if passport_number is not None else 'N/A'
+
+                        passport_details=individual.find("ns:PassportDetails",namespace)
+                        passport_details_text=passport_details.text if passport_details is not None else 'N/A'
+
+                        state_province=individual.find("ns:Individual_TownOfBirth",namespace)
+                        state_province_text=state_province.text if state_province is not None else 'N/A'
+
+                        countryof_birth=individual.find("ns:Individual_CountryOfBirth",namespace)
+                        countryof_birth_text=countryof_birth.text if countryof_birth is not None else 'N/A'
+
+                        NInumber=individual.find("ns:Individual_NINumber",namespace)
+                        NInumber_text=NInumber.text if NInumber is not None else 'N/A'
+
+                        NIdetails=individual.find("ns:Individual_NIDetails",namespace)
+                        NIdetails_text=NIdetails.text if NIdetails is not None else 'N/A'
+
+                            
+
+                        dup.append({
+                            "FIRST_NAME":first_name_text,
+                            "Name": " ".join(names_to_check[:-1]),
+                            "REGINAME":regime_name_text,
+                            "Date_of_Birth":dateofbirth_text,
+
+                            "PASSPORT NUMBER":passport_number2,
+                            "PASSPORT DETAILS":passport_details_text,
+
+                            "NI_NUMBER":NInumber_text,
+                            "NI_DETAILS":NIdetails_text,
+                            # "Second name":second_name,
+
+                            "Address":address_str,
+                            "E-mail":email,
+
+
+                            "Alias_name": ", ".join(name_alias),
+                            
+                            "Birth_Place": f"{state_province_text if state_province_text else '-'}, {countryof_birth_text if countryof_birth_text else '-'}",
+                            "birth_country":countryof_birth_text,
+                            "Nationality": ", ".join(d for d in designation if d),
+                           # "Name Score":name_score,
+                            "Source":"Uk"
+                            })     
+                        # print('result1 executed')
+                # Matching conditions based on provided search parameters
+                    if search_name:
+                        if name_matched:
+                            if (
+                                (search_dob and dob_matched or not search_dob) and
+                                (search_address and address_matched or not search_address) and
+                                (search_country and country_matched or not search_country) and
+                                (search_number and number_matched or not search_number) and
+                                (search_email and email_matched or not search_email)
+                            ):
+                                # All provided parameters match
+                                # print("All parameters match:uk")
+                                result() 
+                    elif not search_name and not search_dob and search_address and not search_number and not search_email:
+                        if address_matched:
+                            # address only
+                            result1()
+                    elif not search_name and not search_dob and not search_address and search_number and not search_country and not search_email:
+                        if number_matched:
+                            # number only
+                            result1()
+                    elif not search_name and not search_dob and not search_address and not search_country and not search_number and search_email:
+                        if email_matched:
+                            # print('matched')
+                            result1()
+        except Exception as e:
+            print(f'Error processing UK data {e}')
+
+        if search_country is None or search_country == "India":
+            def read_file(file_path):
+                try:
+                    with open(file_path, 'r') as file:
+                        lines = file.readlines()
+                    return lines
+                except Exception as e:
+                    print(f'Error reading the file{file_path:{e}}')
+                    return[]
+                
+
+            if (search_name is not None and not search_address  and not search_country and not search_dob and not search_number and not search_email) or (search_name is not None and not search_number  and not search_dob and not search_email  and  (search_address=='India' or search_country=='India')):
+                def match_name(search_name, lines, threshold):
+                    matched_names = []
+                    for line in lines:
+                        names = line.strip().split('@')
+                        primary_name = names[0].strip()  # Primary name is before the first '@'
+                        aliases = [name.strip() for name in names[1:] if name.strip()]  # Collect aliases after the first '@'
+                        for name in [primary_name] + aliases:
+                            name = name.strip()
+                            score = fuzz.partial_ratio(search_name.lower(), name.lower())
+                            #print("score ",score)
+                            if search_name.lower() != name.lower():
+                                if score >= 80 and score <= 100:
+                                   score = score-10
+                            if score >= threshold:
+                                matched_names.append((primary_name, aliases, score))
+                                break
+                    return matched_names
+                file_path = 'Sanction/Listofterrorists.txt'
+                lines = read_file(file_path)
+                matched_names = match_name(search_name, lines, threshold)
+                for name, aliases,score1 in matched_names:
+                    india_results.append({"Name" :name,
+                                        "Alias_name": aliases,
+                                        "Nationality" : "India",
+                                        "Name_score" : score1,
+                                        "Source" : "gov.in"
+                                        })
+            elif (search_address=='India' or search_country=='India') and not search_number and not search_name and not search_dob and not search_email:
+                def match_name(lines):
+                    matched_names = []
+                    for line in lines:
+                        names = line.strip().split('@')
+                        for name in names:
+                            name = name.strip()
+                            primary_name = names[0].strip()  # Primary name is before the first '@'
+                            aliases = [name.strip() for name in names[1:] if name.strip()]  # Collect aliases after the first '@'
+                            #score = fuzz.token_sort_ratio(search_name.lower(), name.lower())
+                            #if score >= threshold:
+                        matched_names.append((primary_name,aliases))
+                    return matched_names
+                file_path = 'Sanction/Listofterrorists.txt'
+                lines = read_file(file_path)
+                matched_names = match_name(lines)
+                for name, aliases in matched_names:
+                    if name != "" and name is not None:
+                        india_results.append({"Name" :name,
+                                              "Alias_name": aliases,
+                                            "Nationality" : "India",
+                                            #"Name Score" : score,
+                                            "Source" : "gov.in"
+                                            })
+            
+        unique_dicts = set(json.dumps(d, sort_keys=True) for d in dup)
+        original= [json.loads(d) for d in unique_dicts]
+        matching_results.extend(original)
+        combined_results  =  matching_results + india_results  + EU_results 
+        end_time = time.time()  # Record end time
+        elapsed_time = end_time - start_time
+
+        print(f"Time taken for fetching and processing: {elapsed_time:.2f} seconds")
+        return combined_results
+    
+    if(search_type=='ENTITY'):
+        try:
+            for entity in euroot.findall('.//ns:sanctionEntity', ns):
+                    # print("3")
+                name_aliases = [name_alias.get('wholeName') for name_alias in entity.findall('.//ns:nameAlias', ns)]
+                countries = [citizen.get('countryDescription') for citizen in entity.findall('.//ns:citizenship', ns)]
+                birthdates = [birthdate.get('birthdate') for birthdate in entity.findall('.//ns:birthdate', ns)]
+                address_datas=[]
+                addresses=[
+                    ", ".join(value for key, value in address.attrib.items() 
+                        if value and key not in ['asAtListingTime', 'logicalId', 'zipCode', 'regulationLanguage']) 
+                    for address in entity.findall('.//ns:address', ns)
+                ]
+                address_datas.extend(addresses)
+
+                        
+                names_to_check = []
+                if name_aliases:
+                    names_to_check.extend(name_aliases)
+                    # print("names_to_check",names_to_check)
+                    # print("countries",countries)
+                    # print("birthdates",birthdates)
+
+                # match DOB
+                if search_dob:
+                    dob_matched=search_dob in birthdates
+
+                    # match address
+                if search_address:
+                     # Covert address list into a single string
+                    address_matched = any(search_address.lower() in addr.lower() for addr in address_datas)
+
+                        
+                # country_match = any(search_country.lower() == country.lower() for country in countries)
+                if search_country:
+                    country_match = any(search_country.lower() == country.lower() for country in countries)
+                    country_matched = country_match
+                else:
+                    country_matched = False
+
+
+                # birthdate_country_match = any(search_country.lower() == birth_country.lower() for birth_country in birthdates)
+
+                        
+                name_matched = False
+                name_score = 0
+                if search_name is not None:
+                    for full_name in names_to_check:
+                        temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                        if search_name.lower()!=full_name.lower():
+                            if temp_score>=80 and temp_score<=100:
+                                temp_score=temp_score-10
+                            
+                        if temp_score > threshold:
+                            name_matched = True
+                            name_score = temp_score
+                            break
+
+                
+                def result():
+                    countries = [citizen.get('countryDescription') for citizen in entity.findall('.//ns:citizenship', ns)]
+                    birth_country = [birthdate.get('countryDescription') for birthdate in entity.findall('.//ns:birthdate', ns)]
+                    matching_results.append({
+                        "Name":"".join(names_to_check),
+                        "Country": countries,
+                        "Birthdate Country": birth_country,
+                        "Name_score": name_score,
+                        "Date_of_Birth":birthdates,
+                        "Address":address_datas,
+                        "Source": "EU"
+                    })
+
+                def result1():
+                    countries = [citizen.get('countryDescription') for citizen in entity.findall('.//ns:citizenship', ns)]
+                    birth_country = [birthdate.get('countryDescription') for birthdate in entity.findall('.//ns:birthdate', ns)]
+                    matching_results.append({
+                        "Name":"".join(names_to_check),
+                        "Country": countries,
+                        "Birthdate Country": birth_country,
+                        #"Name Score": name_score,
+                        "Date_of_Birth":birthdates,
+                        "Address":address_datas,
+                        "Source": "EU"
+                        
+                    })
+                    
+                if search_name and not search_dob and not search_address:
+                    # Case 1: Only name is provided
+                    if name_matched:
+                        result()
+
+                elif search_name and search_dob and not search_address:
+                    # Case 2: Name and DOB are provided
+                    if name_matched and dob_matched:
+                        result()
+
+                elif search_name and search_dob and search_address:
+                    # Case 3: Name, DOB, and Address are provided
+                    if name_matched and dob_matched and address_matched:
+                        result()
+
+                elif not search_name and not search_dob and search_address:
+                    # Case 4: Only address is provided  
+                    if address_matched:
+                        result1()
+        except Exception as e:
+            print(f'Error processing EU data:{e}')
+
+        try:
+            for sdn_entry in ofacroot.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}sdnEntry"):
+                sdn_type_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}sdnType")
+                if sdn_type_element is not None and sdn_type_element.text.lower() == search_type.lower():
+                    first_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                    last_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                    aka_name_element = sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")
+                    nationality_element = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}country")
+                    Nationality_Elements = [add.text for add in nationality_element] if nationality_elements else []
+                    address_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")
+                    address_values=[]
+                    if address_elements:
+                        for address in address_elements:
+                            address_parts=[
+                                address.find(f".//{{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}}{field}").text
+                                for field in ['address1', 'address2', 'address3', 'city', 'country']
+                                if address.find(f".//{{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}}{field}") is not None
+
+                            ]
+                            address_values.append(", ".join(filter(None, address_parts)))
+                    # print(address_values)
+                                            # print("Nationality_Elements",Nationality_Elements)
+                    names_to_check = []
+                    if first_name_element is not None and first_name_element.text:
+                        names_to_check.append(first_name_element.text)
+                    if last_name_element is not None and last_name_element.text:
+                        names_to_check.append(last_name_element.text)
+                    aka_elements = sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")
+                    for aka in aka_elements:
+                        aka_first_name = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}firstName")
+                        aka_last_name = aka.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName")
+                        if aka_first_name is not None and aka_first_name.text:
+                            names_to_check.append(aka_first_name.text)
+                        if aka_last_name is not None and aka_last_name.text:
+                            names_to_check.append(aka_last_name.text)
+        
+
+                    if search_name is not None:
+                        name_matched = False
+                        name_score = 0
+                        for full_name in names_to_check:
+                            temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                            if temp_score > threshold:
+                                name_matched = True
+                                name_score = temp_score
+                                break
+                    else:
+                        name_matched = False
+                        
+                    if search_country is not None:
+                        country_matched = False
+                        for nationality in Nationality_Elements:
+                            if search_country.lower() == nationality.lower():
+                                country_matched = True
+                                break
+                    else:
+                        country_matched = False
+
+                                        # match address
+                    if search_address:
+                     # Covert address list into a single string
+                     address_matched=search_address in address_values
+                     # print(f"Address matched: {address_matched}")
+
+                        
+                    def ofacresult():
+                        # placeofBirth_elements = [pob.text for pob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirth")]
+                        sdnentry_aliases = [f"{aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}uid').text} {aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName').text}" for aka in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")]
+                            # dateOfBirth_elements = [dob.text for dob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")]
+
+                        # Nationality_Elements = [add.text for add in sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")]
+                        matching_results.append({
+                                "Name":"".join(names_to_check[:2]),
+                                "Alias_name": sdnentry_aliases,
+                                # "Date of Birth": dateOfBirth_elements,
+                                # "Birth Place": placeofBirth_elements,
+                                "Nationality": Nationality_Elements,
+                                "Name_score": name_score,
+                                "Source": "OFAC"
+                            })
+
+                    def ofacresult1():
+                            # placeofBirth_elements = [pob.text for pob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}placeOfBirth")]
+                        sdnentry_aliases = [f"{aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}uid').text} {aka.find('.//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}lastName').text}" for aka in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}akaList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}aka")]
+                            # dateOfBirth_elements = [dob.text for dob in sdn_entry.findall(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirthItem/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}dateOfBirth")]
+
+                        # Nationality_Elements = [add.text for add in sdn_entry.find(".//{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}addressList/{https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML}address")]
+                        matching_results.append({
+                                "Name":"".join(names_to_check),
+                                "Alias_name": sdnentry_aliases,
+                                    # "Date of Birth": dateOfBirth_elements,
+                                    # "Birth Place": placeofBirth_elements,
+                                "Nationality": Nationality_Elements,
+                                "Source": "OFAC"
+                            })
+                            
+                    if search_name and not search_address:
+                        # Case 1: Only name is provided
+                        if name_matched:
+                            ofacresult()
+
+                    elif search_name and search_address:
+                        # Case 2: Name and Address are provided
+                        if name_matched and address_matched:
+                            ofacresult1()
+
+                    elif not search_name and search_address:
+                        # Case 3: Only address is provided
+                        if address_matched:
+                            ofacresult1()
+
+        except Exception as e:
+            print(f'Error processing OFAC data{e} ') 
+        try:
+            for individual in unroot.findall(".//ENTITY"):
+                first_name_element = individual.find("FIRST_NAME")
+                # second_name_element = individual.find("SECOND_NAME")
+                # third_name_element = individual.find("THIRD_NAME")
+                alias_name_elements = individual.findall(".//ENTITY_ALIAS/ALIAS_NAME")
+                # dob_elements = individual.findall(".//INDIVIDUAL_DATE_OF_BIRTH/YEAR")
+                # dob_years = [dob.text for dob in dob_elements]
+                address = []
+                addresses = individual.findall(".//ENTITY_ADDRESS")
+
+                for entity_address in addresses:
+                    
+                    address1 = entity_address.find("STREET")
+                    address2 = entity_address.find("STATE_PROVINCE")
+                    address3 = entity_address.find("CITY")
+                    address4 = entity_address.find("COUNTRY")
+                    
+                    # Collect address parts
+                    temp_address = []
+                    if address1 is not None and address1.text:
+                        temp_address.append(address1.text)
+                    if address2 is not None and address2.text:
+                        temp_address.append(address2.text)
+                    if address3 is not None and address3.text:
+                        temp_address.append(address3.text)
+                    if address4 is not None and address4.text:
+                        temp_address.append(address4.text)
+
+                    if temp_address:
+                        address.append(",".join(temp_address)) 
+                # print(address)
+
+                
+                # Check names and aliases
+                names_to_check = []
+                if first_name_element is not None and first_name_element.text:
+                    names_to_check.append(first_name_element.text)
+                if alias_name_elements:
+                    for alias_element in alias_name_elements:
+                        if alias_element.text:
+                            names_to_check.append(alias_element.text)
+                
+                # Debug print to check collected names
+                # print(f"Names to check: {names_to_check}")
+
+                # # Fuzzy matching for names
+                if search_name is not None:
+                    name_matched = False
+                    name_score = 0
+                    for full_name in names_to_check:
+                        temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                        if search_name.lower() != full_name.lower():
+                            if temp_score >= 80 and temp_score <= 100:
+                                temp_score = temp_score-10
+                        if temp_score > threshold:
+                            name_matched = True
+                            name_score = temp_score
+                            break
+                else:
+                    name_matched = False
+                nationality_elements = [n.text for n in individual.findall(".//NATIONALITY/VALUE")]
+                if search_country is not None:
+                    country_matched = False
+                    for nationality in nationality_elements:
+                        if search_country.lower() == nationality.lower():
+                            country_matched = True
+                            break
+                else:
+                    country_matched = False
+
+
+                # match address
+                address_str=[]
+                if search_address:
+                    for addr in address:
+                        address_matched = search_address in address
+                        address_str.append(addr)
+                        # print(addr)
+                        # print(address_matched)
+                    # Covert address list into a single string
+                    # address_str=','.join(address)
+                    # print("single:",address_matched)
+                    # address_matched=search_address in address_str
+
+                    # print(f"Address matched: {address_matched}")
+                # print(address_str)
+
+                                        
+                def result():
+                    name_aliases = [alias.text for alias in individual.findall(".//ENTITY_ALIAS/ALIAS_NAME")]
+                    designation = [d.text for d in individual.findall(".//DESIGNATION/VALUE")]
+                    # dob_elements = individual.findall(".//INDIVIDUAL_DATE_OF_BIRTH")
+                    # dob = [{"type": dob.find("TYPE_OF_DATE").text, "year": dob.find("YEAR").text} for dob in dob_elements if dob.find("TYPE_OF_DATE") is not None and dob.find("YEAR") is not None]
+                    # pob = individual.find(".//INDIVIDUAL_PLACE_OF_BIRTH")
+                    # city = pob.find("CITY").text if pob.find("CITY") is not None else "N/A"
+                    # state_province = pob.find("STATE_PROVINCE").text if pob.find("STATE_PROVINCE") is not None else "N/A"
+                    # country = pob.find("COUNTRY").text if pob.find("COUNTRY") is not None else "N/A"
+
+                    matching_results.append({
+                            "Name":"".join(full_name),
+                            "Alias_name": name_aliases,
+                            "Designation":designation,
+                            "Address":address,
+                            # "Date of Birth": dob,
+                            # "Birth City": city,
+                            # "Birth State": state_province,
+                            # "Nationality": country,
+                            "Name_score": name_score,
+                            "Source": "UNSC"
+                        })
+                    # print(matching_results)
+                def result1():
+                    name_aliases = [alias.text for alias in individual.findall(".//ENTITY_ALIAS/ALIAS_NAME")]
+                    designation = [d.text for d in individual.findall(".//DESIGNATION/VALUE")]
+                    # dob_elements = individual.findall(".//INDIVIDUAL_DATE_OF_BIRTH")
+                    # dob = [{"type": dob.find("TYPE_OF_DATE").text, "year": dob.find("YEAR").text} for dob in dob_elements if dob.find("TYPE_OF_DATE") is not None and dob.find("YEAR") is not None]
+                    # pob = individual.find(".//INDIVIDUAL_PLACE_OF_BIRTH")
+                    # city = pob.find("CITY").text if pob.find("CITY") is not None else "N/A"
+                    # state_province = pob.find("STATE_PROVINCE").text if pob.find("STATE_PROVINCE") is not None else "N/A"
+                    # country = pob.find("COUNTRY").text if pob.find("COUNTRY") is not None else "N/A"
+
+                    matching_results.append({
+                            "Name":"".join(names_to_check),
+                            "Alias_name": name_aliases,
+                            "Designation":designation,
+                            "Address":address_str,
+                            # "Date of Birth": dob,
+                            # "Birth City": city,
+                            # "Birth State": state_province,
+                            # "Nationality": country,
+                            "Source": "UNSC"
+                        })
+                    
+                if search_name and not search_address:
+                        # Case 1: Only name is provided
+                    if name_matched:
+                        result()
+
+                elif search_name and search_address:
+                        # Case 2: Name and Address are provided
+                    if name_matched and address_matched:
+                        result()
+
+                elif not search_name and search_address:
+                        # Case 3: Only address is provided
+                    if address_matched:
+                        result1()
+
+        except Exception as e:
+            print(f'Error processing UNSC data:{e}')
+
+        try:
+            for row in sheet.iter_rows(min_row=2, values_only=True):  
+                if row[2].upper()== search_type:
+                    names_to_check=[]
+                    if row[1]:
+                        names_to_check.append(row[1])
+                    if row[3]:
+                        names_to_check.append(row[3])
+
+                    address_data=[]
+                    if row[7]:
+                        address_parts=row[7]
+                        address_data.append(address_parts)
+                    address_matched=False
+                    if search_address:
+                        address_str=','.join(address_data)
+                        address_matched=search_address in address_str
+
+                    if search_name is not None:
+                        name_matched=False
+                        name_score=0
+                        for full_name in names_to_check:
+                            temp_score = fuzz.partial_ratio(search_name.lower(), full_name.lower())
+                            if search_name != full_name:
+                                if temp_score >= 80 and temp_score <= 100:
+                                    temp_score = temp_score - 10
+                            if temp_score > threshold:
+                                name_matched = True
+                                name_score = temp_score
+                                break
+                    else:
+                        name_matched = False
+
+                    citizen=[]
+                    nationality_elements = row[6]  # Assuming nationality is in the fifth column (index 4)
+                    citizen.append(nationality_elements)
+                    if search_country is not None:
+                        country_matched=False
+                        for nationality in citizen:
+                            if search_country==nationality:
+                                country_matched=True
+                                break
+                    else:
+                        country_matched = False
+
+                    def result():
+                        name_type=row[3]
+                        pob=row[5]
+                        address=row[7]
+                        
+
+                        dob = row[4]  # Assuming date of birth is in the fourth column (index 3)
+
+                        matching_results.append({
+                            "Name": " ".join(names_to_check),
+                            "Name Type":name_type,
+                            "Address":address,
+                            "Alias_name": [],  # Assuming no alias name in Excel
+                            "Designation": [],  # Assuming no designation in Excel
+                            "Date_of_Birth": dob,
+                            "Birth_Place": pob,  # Assuming no city information in Excel
+                            "Birth State": "N/A",  # Assuming no state information in Excel
+                            "Nationality": nationality_elements,
+                            "Name_score": name_score,
+                            "Source": "AUSTRALIA"
+                        })
+
+                    def result1():
+                        name_type=row[3]
+                        pob=row[5]
+                        address=row[7]
+                        
+
+                        dob = row[4]  # Assuming date of birth is in the fourth column (index 3)
+
+                        matching_results.append({
+                            "Name": " ".join(names_to_check),
+                            "Name Type":name_type,
+                            "Address":address,
+                            "Alias_name": [],  # Assuming no alias name in Excel
+                            "Designation": [],  # Assuming no designation in Excel
+                            "Date_of_Birth": dob,
+                            "Birth_Place": pob,  # Assuming no city information in Excel
+                            "Birth State": "N/A",  # Assuming no state information in Excel
+                            "Nationality": nationality_elements,
+                            #"Name Score": name_score,
+                            "Source": "AUSTRALIA"
+                        })
+
+                    if search_name and not search_address:
+                            # Case 1: Only name is provided
+                        if name_matched:
+                            result()
+
+                    elif search_name and search_address:
+                            # Case 2: Name and Address are provided
+                        if name_matched and address_matched:
+                            result()
+
+                    elif not search_name and search_address:
+                            # Case 3: Only address is provided
+                        if address_matched:
+                            result1()
+
+
+        except Exception as e:
+            print(f'Error processiing AUS data:{e}')
+
+        try:
+            for individual in ukroot.findall(".//ns:FinancialSanctionsTarget", namespace):
+                group_type = individual.find("ns:GroupTypeDescription", namespace)
+                if group_type is not None and group_type.text.upper()=='ENTITY':
+                    first_name = individual.find("ns:Name6", namespace)  # Adjust to correct tag if needed
+                    second_name=individual.find("ns:name1",namespace)
+                    third_name=individual.find("ns:name2",namespace)
+                    alias_name=individual.findall("ns:AliasType",namespace)
+                    address=[]
+                    for i in range(1,7):
+                        addr=individual.find(f"ns:Address{i}",namespace)
+                        if addr is not None and addr.text:
+                            address.append(addr.text)
+
+                    # address match
+                    address_str=','.join(address)
+                    if search_address:
+                        address_matched=search_address in address_str
+                    # print(address_str)
+                    
+
+                    
+                            #check name and aliases  
+                    names_to_check = []
+                    if first_name is not None and first_name.text:
+                        names_to_check.append(first_name.text)
+                    if second_name is not None and second_name.text:
+                        names_to_check.append(second_name.text)
+                    if third_name is not None and third_name.text:
+                        names_to_check.append(third_name.text)
+                    # if coutry is not None and coutry.text:
+                    #     names_to_check.append(coutry.text)
+                    if alias_name:
+                        for alias in alias_name:
+                            if alias.text:
+                                names_to_check.append(alias.text)
+
+                                    # fuzzy matching for names
+                    if search_name is not None:
+                        name_matched=False
+                        name_score=0
+                        for full_name in names_to_check:
+                            temp_score=fuzz.partial_ratio(search_name.lower(),full_name.lower())
+                            # print(f"Comparing '{search_name}' with '{full_name}', score: {temp_score}")
+                            if search_name.lower() != full_name.lower():
+                                if temp_score>=80 and temp_score<=100:
+                                    temp_score=temp_score-10
+                                    # print(f"its a score{temp_score}")
+                            if temp_score>threshold:
+                                name_matched=True
+                                name_score=temp_score
+                                break
+                    else:
+                        name_matched=False
+
+                    nationality_elements=[n.text for n in individual.findall("ns:Country", namespace)]
+                    # print(f"helle{nationality_elements}")
+                    if search_country:
+                        country_matched = False
+                        for nationality in nationality_elements:
+                            if nationality is not None and search_country.lower() == nationality.lower():
+                                # print('Country matched in loop')
+                                country_matched = True
+                                break
+
+                    else:
+                        country_matched=False
+
+                                    
+                    def result():
+                        name_alias=[alias.text for alias in individual.findall("ns:AliasType",namespace)]
+
+                        # second_name_element = individual.find("ns:Name6", namespace)
+                        # second_name = second_name_element.text if second_name_element is not None else "N/A"
+
+                        designation=[d.text for d in individual.findall("ns:Country",namespace)]
+                        pob=individual.find("ns:Individual_TownOfBirth",namespace)
+                        state_province=pob.find("ns:Individual_CountryOfBirth",namespace).text if pob.find(".//ns:Individual_CountryOfBirth",namespace) is not None else "N/A"
+
+
+                        first_name = individual.find("ns:Name6", namespace)
+                        first_name_text = first_name.text if first_name is not None else 'N/A'
+
+                        regime_name=individual.find("ns:RegimeName",namespace)
+                        regime_name_text=regime_name.text if regime_name is not None else 'N/A'
+
+                        dateofbirth=individual.find("ns:Individual_DateOfBirth",namespace)
+                        dateofbirth_text=dateofbirth.text if dateofbirth is not None else 'N/A'
+
+                        
+                        state_province=individual.find("ns:Individual_TownOfBirth",namespace)
+                        state_province_text=state_province.text if state_province is not None else 'N/A'
+
+                        countryof_birth=individual.find("ns:Individual_CountryOfBirth",namespace)
+                        countryof_birth_text=countryof_birth.text if countryof_birth is not None else 'N/A'
+
+                        passport_number=individual.find("ns:Individual_PassportNumber",namespace)
+                        passport_number_text=passport_number.text if passport_number is not None else 'N/A'
+
+                        passport_details=individual.find("ns:Individual_PassportDetails",namespace)
+                        passport_details_text=passport_details.text if passport_details is not None else 'N/A'
+
+                        NInumber=individual.find("ns:Individual_NINumber",namespace)
+                        NInumber_text=NInumber.text if NInumber is not None else 'N/A'
+
+                        NIdetails=individual.find("ns:Individual_NIDetails",namespace)
+                        NIdetails_text=NIdetails.text if NIdetails is not None else 'N/A'
+
+
+                        # first_address_element = individual.find("ns:Address1", namespace)
+                        # first_address_text = first_address_element.text if first_address_element is not None else "N/a"
+
+                        # second_address_element=individual.find("ns:Address2",namespace)
+                        # second_address_text=second_address_element.text if first_address_element is not None else "N/A"
+
+                        # third_address_element=individual.find("ns:Address3",namespace)
+                        # third_address_text=third_address_element.text if third_address_element is not None else "N/A"
+
+                        # fourth_address_element=individual.find("ns:Address4",namespace)
+                        # fourth_address_text=fourth_address_element.text if third_address_element is not None else "N/A"
+
+                        # address_list = [first_address_text, second_address_text, third_address_text, fourth_address_text]
+
+                        
+                        dup.append({
+                            "FIRST_NAME":first_name_text,
+                            "Name": " ".join([full_name, first_name_text]),
+                            # "Second name":second_name,
+                            "REGINAME":regime_name_text,
+                            "Date_of_Birth":dateofbirth_text,
+                            
+                            "PASSPORT NUMBER":passport_number_text,
+                            "PASSPORT DETAILS":passport_details_text,
+                            "NI_NUMBER":NInumber_text,
+                            "NI_DETAILS":NIdetails_text,
+                            "Address":address_str,
+
+
+                            "Alias_name": name_alias,
+                            # "Birth city":state_province_text,
+                            "Birth_Place":(state_province_text,countryof_birth_text),
+                            "birth_country":countryof_birth_text,
+                            "Nationality ":designation,
+                            "Name_score":name_score,
+                            "Source":"Uk"
+                            })
+                        # print(matching_results)
+                        # print('result execute')
+
+                    
+
+                    def result1():
+                        name_alias=[alias.text for alias in individual.findall("ns:AliasType",namespace)]
+
+                        # second_name_element = individual.find("ns:Name6", namespace)
+                        # second_name = second_name_element.text if second_name_element is not None else "N/A"
+
+                        designation=[d.text for d in individual.findall("ns:Country",namespace)] 
+                        pob=individual.find("ns:Individual_TownOfBirth",namespace)
+
+                        first_name = individual.find("ns:Name6", namespace)
+                        first_name_text = first_name.text if first_name is not None else 'N/A'
+
+                        regime_name=individual.find("ns:RegimeName",namespace)
+                        regime_name_text=regime_name.text if regime_name is not None else 'N/A'
+
+                        dateofbirth=individual.find("ns:Individual_DateOfBirth",namespace)
+                        dateofbirth_text=dateofbirth.text if dateofbirth is not None else 'N/A'
+
+                        passport_number=individual.find("ns:PassportNumber",namespace)
+                        passport_number_text=passport_number.text if passport_number is not None else 'N/A'
+
+                        passport_details=individual.find("ns:PassportDetails",namespace)
+                        passport_details_text=passport_details.text if passport_details is not None else 'N/A'
+
+                        state_province=individual.find("ns:Individual_TownOfBirth",namespace)
+                        state_province_text=state_province.text if state_province is not None else 'N/A'
+
+                        countryof_birth=individual.find("ns:Individual_CountryOfBirth",namespace)
+                        countryof_birth_text=countryof_birth.text if countryof_birth is not None else 'N/A'
+
+                        NInumber=individual.find("ns:Individual_NINumber",namespace)
+                        NInumber_text=NInumber.text if NInumber is not None else 'N/A'
+
+                        NIdetails=individual.find("ns:Individual_NIDetails",namespace)
+                        NIdetails_text=NIdetails.text if NIdetails is not None else 'N/A'
+
+                            
+
+                        dup.append({
+                            "FIRST_NAME":first_name_text,
+                            "Name": " ".join([full_name, first_name_text]),
+                            "REGINAME":regime_name_text,
+                            "Date_of_Birth":dateofbirth_text,
+
+                            "PASSPORT NUMBER":passport_number_text,
+                            "PASSPORT DETAILS":passport_details_text,
+
+                            "NI_NUMBER":NInumber_text,
+                            "NI_DETAILS":NIdetails_text,
+                            # "Second name":second_name,
+
+                            "Address":address_str,
+
+
+                            "Alias_name": name_alias,
+                            
+                            # "Birth city":state_province_text,
+                            "Birth_Place":(state_province_text,countryof_birth_text),
+                            "birth_country":countryof_birth_text,
+                            "Nationality":designation,
+                            #"Name Score":name_score,
+                            "Source":"Uk"
+                            })     
+                        # print('result1 executed')
+
+                    if search_name and not search_address:
+                            # Case 1: Only name is provided
+                        if name_matched:
+                            result()
+
+                    elif search_name and search_address:
+                            # Case 2: Name and Address are provided
+                        if name_matched and address_matched:
+                            result()
+
+                    elif not search_name and search_address:
+                            # Case 3: Only address is provided
+                        if address_matched:
+                            result1()
+
+        except Exception as e:
+            print(f'Error Processing Uk data :{e}')
+
+        unique_dicts = set(json.dumps(d, sort_keys=True) for d in dup)
+        original= [json.loads(d) for d in unique_dicts]
+        matching_results.append(original)
+        return matching_results
+
+# results = fetch_and_search(search_name="Mohammad",search_type="INDIVIDUAL")
+# print(results)

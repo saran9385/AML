@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulk PEP and Sanction Checks</title>
+    <link rel="stylesheet" href="../static/upload.css">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='images/image.png') }}" type="image/x-icon">
+</head>
+<body>
+    <button id="back-button" onclick="window.location.href='/'"><i class="fa-solid fa-backward"></i></button>
+    <div id="head_image">
+        <img src="{{ url_for('static', filename='images/image.png') }}" alt="Example Image">
+    </div>
+    <div class="container">
+        <h1>Bulk PEP and Sanction Checks</h1>
+        <form id="upload-form" action="/upload_form" method="POST" enctype="multipart/form-data" onsubmit="handleFormSubmit(event)">
+            <label for="file">Upload CSV or Excel File:</label>
+            <input type="file" name="file" id="file" accept=".csv, .xls, .xlsx" required>
+            <button type="submit" id="upload-btn">Upload</button>
+        </form>
+        <div id="actions-container"></div>
+    </div>
+    <footer>
+        <p>Copyright &copy; 2025 All rights reserved.</p>
+    </footer>    
+    <script>
+        function handleFormSubmit(event) {
+            event.preventDefault();
+
+            const button = document.getElementById('upload-btn');
+            const form = document.getElementById('upload-form');
+            const actionsContainer = document.getElementById('actions-container');
+            
+            // Disable the button t
+            button.disabled = true;
+            button.textContent = 'Uploading...';
+
+            // Clear any previous links
+            actionsContainer.innerHTML = '';
+
+            //to handle server response
+            const formData = new FormData(form);
+
+            fetch(form.action, {
+                method: form.method,
+                body: formData
+            })
+            .then(response => {
+                if (response.ok) {
+                    // file download process
+                    return response.blob();
+                } else {
+                    throw new Error('Failed to process the request');
+                }
+            })
+            .then(blob => {
+                // Create a URL
+                const url = window.URL.createObjectURL(blob);
+                const fileName = 'Download_File'; 
+
+
+                const downloadMessage = document.createElement('span');
+                downloadMessage.textContent = 'Download completed, please click to download - ';
+
+                
+                const downloadLink = document.createElement('a');
+                downloadLink.href = url;
+                downloadLink.download = fileName;
+                downloadLink.textContent = fileName;
+                downloadLink.className = 'file-link';
+                actionsContainer.appendChild(downloadMessage);
+                actionsContainer.appendChild(downloadLink);
+            })
+            .catch(error => {
+                console.error(error);
+                alert('An error occurred while processing the file.');
+            })
+            .finally(() => {
+                // Re-enable the button and reset its text
+                button.disabled = false;
+                button.textContent = 'Upload Again';
+            });
+        }
+    </script>
+    <script src="https://kit.fontawesome.com/63b0973870.js" crossorigin="anonymous"></script>
+</body>
+</html>

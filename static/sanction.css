@@ -1,0 +1,234 @@
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 20px 0;
+}
+table, th, td {
+    border: 1px solid  black;
+}
+th, td {
+    padding: 8px;
+    text-align: left;
+}
+th{
+    color: #f4f4f4;
+    background-color: #19485F;
+}
+td {
+    background-color: #f4f4f4;
+    color: #19485F;
+}
+
+body{
+    /* background-color: #19485F;
+    color: #d9e0a4; */
+    background-color: #E5E4E2;
+    color: black;
+    font-family: 'Montserrat', sans-serif;
+    margin: 20px;
+    /* text-align: center; */
+    font-size: 13px;
+}
+body>h1{
+    padding-top: 30px;
+    font-size: 30px;
+    text-align: center;
+    margin: 30px;
+    font-weight: 300;
+}
+form {
+    max-width: 400px;
+    margin: 0 auto;
+    padding: 20px;
+    border: 1px solid #ccc;
+    border-radius: 10px;
+    background-color: #f9f9f9;
+    color: #19485F;
+}
+label {
+    display: block;
+    /* margin-bottom: 5px; */
+    font-weight: bold;
+}
+input[type="text"],
+input[type="number"],
+button {
+    width: 100%;
+    padding: 8px;
+    /* margin-bottom: 15px; */
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+input[type="text"],
+input[type="number"]{
+    width: 95%;
+}
+input[type="radio"] {
+    margin-right: 5px;
+}
+.search {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    cursor: pointer;
+}
+.search:hover {
+    background-color: #0056b3;
+    box-shadow: 0 6px 10px rgba(0, 0, 0, 0.15);
+}
+.type{
+    position: relative;
+    left: 23px;
+    bottom: 20px;
+}
+
+
+.pagination-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 15px;
+    margin: 20px 0;
+    font-family: Arial, sans-serif;
+}
+
+.pagination-button {
+    text-decoration: none;
+    /* #background-color: #007bff; */
+    color: black;
+    /* padding: 8px 15px; */
+    /* border-radius: 5px; */
+    /* transition: background-color 0.3s ease; */
+    font-weight: bold;
+    font-size: 14px;
+}
+
+.pagination-button:hover {
+    color: grey;
+}
+
+.pagination-info {
+    font-size: 16px;
+    font-weight: bold;
+}
+#back-button{
+    width: 35px;
+    position: absolute;
+    right: 30px;
+    border-radius: 100%;
+
+}
+
+#download-btn{
+    border: 1px solid black;
+    width: 15%;
+    padding: 10px;
+    color: black;
+    background-color: #f4f4f4;
+    margin-left: 85%;
+    position: relative;
+    top: -35px;
+
+}
+/* Create the animation for the dots */
+/* @keyframes dot-blink {
+    0% {
+        content: '.';
+    }
+    33% {
+        content: '..';
+    }
+    66% {
+        content: '...';
+    }
+    100% {
+        content: '...';
+    }
+} */
+
+/* Apply the animation to the dots */
+/* #dots::after {
+    content: '';
+    animation: dot-blink 1.5s infinite steps(1);
+} */
+
+
+#loading-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    /* height: 100vh; */
+    text-align: center;
+    margin-top: 5%;
+}
+
+/* #spinner {
+    border: 8px solid #f3f3f3; 
+    border-top: 8px solid #3498db; 
+    width: 60px;
+    height: 60px;
+    animation: spin 1s linear infinite;
+    margin-bottom: 10px;
+    margin-left: 47%;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+} */
+
+#loading-text {
+    font-size: 18px; /* Make the text a little bigger */
+}
+#head_image {
+    position: absolute;
+    top: 20px; 
+    left: 10px; 
+    padding: 10px; 
+}
+
+#head_image img {
+    width: 130px; 
+    height: auto; 
+}
+footer {
+    background-color: #333;
+    color: white;
+    /* text-align: center; */
+    margin-left: -20px;
+    margin-top: 50px;
+    padding: 20px 0;
+    width: 104%;
+}
+footer >p{
+    margin-left: 70px;
+}
+.loader-5 {
+    position: absolute;
+    left: 38%;
+    top: 114%;
+    scale: 0.325;
+  }
+  
+  .loader-5 svg {
+    --blue: #8f44fd;
+    stroke: var(--blue);
+    stroke-width: 5;
+    fill: none;
+    stroke-dasharray: 50, 14;
+    stroke-dashoffset: 192;
+    animation: dash_682 1.8s linear infinite;
+  }
+  
+  @keyframes dash_682 {
+    72.5% {
+      opacity: 1;
+    }
+  
+    to {
+      stroke-dashoffset: 1;
+    }
+  }
+  

@@ -1,0 +1,327 @@
+ 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PEP Check</title>
+    <!-- <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin> -->
+    <!-- <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet"> -->
+    <link rel="stylesheet" href="../static/pep.css">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='images/image.png') }}" type="image/x-icon">
+</head>
+<body>
+    <button id="back-button" onclick="window.location.href='/'"><i class="fa-solid fa-backward"></i></button>
+    <div id="head_image">
+        <img src="{{ url_for('static', filename='images/image.png') }}" alt="Example Image">
+    </div>
+    <h1>PEP Check</h1>
+    <form method="POST" onsubmit="showLoading(event)">
+        <label for="search_type">Search Type:</label><br>
+        <input type="radio" name="search_type" id="search_names" value="names" onchange="toggleInputFields()" required checked>
+        <label for="search_names" class="type">Name Only</label>
+        <input type="radio" name="search_type" id="search_positions" value="positions" onchange="toggleInputFields()" required>
+        <label for="search_positions" class="type">Position Only</label>
+        <input type="radio" name="search_type" id="search_names_positions" value="names_positions" onchange="toggleInputFields()" required>
+        <label for="search_names_positions" class="type">Name and Position</label>
+
+        
+
+
+   
+        <!-- Both Input fields (Search Names and Search Positions) should be visible and enabled/disabled based on the selection -->
+        <div id="search_names_field">
+            <label for="name_query">Search Name:</label>
+            <input type="text" name="name_query" id="name_query" disabled required>
+        </div>
+        <br>
+   
+        <div id="search_positions_field">
+            <label for="position_query">Search Position:</label>
+            <input type="text" name="position_query" id="position_query" disabled required>
+        </div>
+        <br>
+   
+        <label for="threshold">Threshold (Optional):</label>
+        <input type="number" name="threshold" id="threshold" min="0" max="100" value="80" oninput="validateThreshold()">
+        <br><br>
+
+        <label for="country" title="Enter The Country To Searc">Search Country:</label>
+        <input type="text" name="country" id="country" placeholder="Select Country" oninput="showSuggestions(this.value)">
+        <div id="suggestions" style="border: 1px solid #ccc; max-height: 200px; overflow-y: auto; display: none;"></div>
+        <br><br>
+   
+        <label for="dob">Date of Birth:</label>
+        <input type="text" name="dob" id="dob" placeholder="eg.YYYY-MM-DD or YYYY (Year only)">
+        <br><br>
+
+
+   
+        <button type="submit" class="search">Search</button>
+    </form>
+    <!-- Loading Spinner and Text -->
+    <div id="loading-container" style="display: none;">
+        <div class="loader-5">
+            <svg
+              viewBox="0 0 187.3 93.7"
+              height="200px"
+              width="300px"
+              class="svgbox"
+            >
+              <defs>
+                <linearGradient y2="0%" x2="100%" y1="0%" x1="0%" id="gradient">
+                  <stop stop-color="#8f44fd" offset="0%"></stop>
+
+                  <stop stop-color="#fd44db" offset="100%"></stop>
+                </linearGradient>
+              </defs>
+
+              <path
+                stroke="url(#gradient)"
+                d="M93.9,46.4c9.3,9.5,13.8,17.9,23.5,17.9s17.5-7.8,17.5-17.5s-7.8-17.6-17.5-17.5c-9.7,0.1-13.3,7.2-22.1,17.1c-8.9,8.8-15.7,17.9-25.4,17.9s-17.5-7.8-17.5-17.5s7.8-17.5,17.5-17.5S86.2,38.6,93.9,46.4z"
+              ></path>
+            </svg>
+          </div>
+        <div id="loading-text" style="font-weight: bold; text-align: center;">
+            Loading, please wait...<span id="dots"></span>
+        </div>
+    </div>
+
+
+
+    <div id="results-container" style="display: block;" onload="scrollToResults()">
+        {% if query or (name_query and position_query) %}
+        {% if results %}
+            <h2>Results for {{ search_type }}: </h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Position</th>
+                        <th>Score Accuracy</th>
+                        <th>DOB</th>
+                        <th>Position Start Date</th>
+                        <th>Position End Date</th>
+                        <th>Record</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for result in results %}
+                    <tr>
+                        <td>{{ result.name if result.name else "-" }}</td>
+                        <td>{{ result.position if result.position else "-" }}</td>
+                        <td>{{ result.score if result.score else "-" }}</td>
+                        <td>{{ result.dob if result.dob else "-" }}</td>
+                        <td>{{ result.startDate if result.startDate else "-" }}</td>
+                        <td>{{ result.endDate if result.endDate else "-" }}</td>
+                        <td>{{ result.record if result.record else "-" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div class="pagination-container">
+                <!-- Pagination Controls -->
+                {% if page and page > 1 %}
+                <a class="pagination-button" href="{{ url_for('pep', page=page-1, search_type=search_type, query=query,name_query=name_query,position_query=position_query, threshold=threshold, dob=dob) }}"><i class="fa-solid fa-backward"></i></a>
+                {% endif %}
+                <span class="pagination-info">Page {{ page }} of {{ total_pages }}</span>
+                {% if has_next %}
+                    <a class="pagination-button" href="{{ url_for('pep', page=page+1, search_type=search_type, query=query,name_query=name_query,position_query=position_query, threshold=threshold, dob=dob) }}"><i class="fa-solid fa-forward"></i></a>
+                {% endif %}
+            </div>
+            <button id="download-btn" onclick="downloadData()">
+                Download All Data <i class="fa-solid fa-download"></i>
+            </button>
+            {% else %}
+                <p>No results found. Please try a different search query.</p>
+            {% endif %}
+        {% endif %}
+    </div>
+        <footer>
+        <p>Copyright &copy; 2025 All rights reserved.</p>
+    </footer>    
+    
+    <script>
+            function downloadData() {
+    var btn = document.getElementById('download-btn');
+    btn.disabled = true;
+    btn.innerHTML = 'Downloading... <i class="fa-solid fa-spinner fa-spin"></i>';
+
+    // Build the download URL
+    const url = `/pep/download?search_type={{ search_type }}&query={{ query }}&name_query={{ name_query }}&position_query={{ position_query }}&threshold={{ threshold }}&dob={{ dob }}`;
+
+    fetch(url)
+    .then(response => response.blob())
+    .then(blob => {
+        // Create a temporary link to download the file
+        const link = document.createElement('a');
+        link.href = window.URL.createObjectURL(blob);
+        link.download = "pep_results.csv"; // Change filename if needed
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        // Update button after download starts
+        btn.innerHTML = 'Downloaded <i class="fa-solid fa-check"></i>';
+        btn.disabled = false;
+    })
+    .catch(error => {
+        console.error('Download failed', error);
+        btn.innerHTML = 'Download Failed';
+        btn.disabled = false;
+    });
+}
+    // function downloadData() {
+    //     // Update button state to indicate downloading
+    //     var btn = document.getElementById('download-btn');
+    //     btn.disabled = true;
+    //     btn.innerHTML = 'Downloading... <i class="fa-solid fa-spinner fa-spin"></i>';
+
+    //     // Create a hidden iframe to initiate the download
+    //     const iframe = document.createElement('iframe');
+    //     iframe.style.display = 'none';
+    //     iframe.src = '/pep/download?search_type={{ search_type }}&query={{ query }}&name_query={{ name_query }}&position_query={{ position_query }}&threshold={{ threshold }}&dob={{ dob }}';
+
+    //     // Detect when the iframe finishes loading (indicating the server has completed the download)
+    //     iframe.onload = function () {
+    //         // Update button state to indicate download is complete
+    //         btn.innerHTML = 'Downloaded <i class="fa-solid fa-check"></i>';
+    //         btn.disabled = false;
+
+    //         // Clean up the iframe after the download starts
+    //         document.body.removeChild(iframe);
+    //     };
+
+    //     // Append the iframe to the document to trigger the request
+    //     document.body.appendChild(iframe);
+    // }
+        function toggleInputFields() {
+            // Get the selected radio button values
+            const searchPositions = document.getElementById("search_positions").checked;
+            const searchNames = document.getElementById("search_names").checked;
+            const searchNamesAndPositions = document.getElementById("search_names_positions").checked;
+       
+            // Enable or disable the relevant input field based on the selected radio button
+            document.getElementById("position_query").disabled = !(searchPositions || searchNamesAndPositions);
+            document.getElementById("name_query").disabled = !(searchNames || searchNamesAndPositions);
+       
+            // clear the field and placeholder
+            if (searchPositions) {
+                document.getElementById("name_query").value = "";
+                document.getElementById("name_query").placeholder = "";
+            } else if (searchNames) {
+                document.getElementById("position_query").value = "";
+                document.getElementById("name_query").placeholder = "";
+            }
+
+            // restore placeholder
+            if (searchNamesAndPositions) {
+                document.getElementById("name_query").placeholder = "FirstName or LastName"; // Both placeholders
+                document.getElementById("position_query").placeholder = "Enter Position";
+            }
+            if (searchNames && !searchNamesAndPositions) {
+                document.getElementById("name_query").placeholder = "FirstName or LastName"; // Only name placeholder
+            }
+            if (searchPositions && !searchNamesAndPositions) {
+                document.getElementById("position_query").placeholder = "Enter Position"; // Only position placeholder
+            }
+            
+        }
+        // for make name input default
+        window.onload = function() {
+            toggleInputFields();
+        };
+        
+        function validateThreshold() {
+            var threshold = document.getElementById('threshold');
+            if (threshold.value > 100) {
+                threshold.value = 100; // Set the value to 100 if it exceeds the max
+            }
+        }
+        function showLoading(event) {
+            // Prevent default form submission
+            event.preventDefault();
+    
+            // Hide the entire results container
+            const resultsContainer = document.getElementById('results-container');
+            if (resultsContainer) {
+                resultsContainer.style.display = 'none';
+            }
+    
+            // Show the loading text
+            document.getElementById('loading-container').style.display = 'block';
+    
+            // Scroll to the loading text
+            document.getElementById('loading-container').scrollIntoView({ behavior: 'smooth' });
+    
+            // Submit the form manually (if needed)
+            event.target.submit();
+        }
+        // Function to scroll to the table after results are loaded
+        function scrollToResults() {
+            const resultsContainer = document.getElementById('results-container');
+            if (resultsContainer && resultsContainer.style.display !== 'none') {
+                resultsContainer.style.display = 'block';
+                resultsContainer.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            // Only call scrollToResults if results exist
+            if (document.querySelector("#results-container table tbody tr")) {
+                scrollToResults();
+            }
+        });
+
+
+         // countries from the API and store them
+        let countries = [];
+
+        fetch('https://restcountries.com/v3.1/all')
+        .then(response => response.json())
+        .then(data => {
+            countries = data.map(country => country.name.common); // Extract the common name of the countries
+        })
+        .catch(error => console.log('Error fetching country data:', error));
+
+        function showSuggestions(value) {
+            const suggestionsDiv = document.getElementById("suggestions");
+            suggestionsDiv.innerHTML = ''; // Clear previous suggestions
+            if (value) {
+                const filteredCountries = countries.filter(country => country.toLowerCase().startsWith(value.toLowerCase()));
+                if (filteredCountries.length > 0) {
+                    suggestionsDiv.style.display = 'block';
+                    filteredCountries.forEach(country => {
+                        const div = document.createElement('div');
+                        div.textContent = country;
+                        div.style.padding = '8px';
+                        div.style.cursor = 'pointer';
+                        div.onclick = function() {
+                            document.getElementById("country").value = country;
+                            suggestionsDiv.style.display = 'none'; // Hide suggestions when a country is selected
+                        };
+                        suggestionsDiv.appendChild(div);
+                    });
+                } else {
+                    suggestionsDiv.style.display = 'none'; // Hide if no matches
+                }
+            } else {
+                suggestionsDiv.style.display = 'none'; // Hide if input is empty
+            }
+        }
+
+        // Close suggestions when clicking outside the input
+        document.addEventListener("click", function(event) {
+            const suggestionsDiv = document.getElementById("suggestions");
+            const countryInput = document.getElementById("country");
+            if (!countryInput.contains(event.target)) {
+                suggestionsDiv.style.display = 'none';
+            }
+        });
+    </script>
+    <script src="https://kit.fontawesome.com/63b0973870.js" crossorigin="anonymous"></script>
+    
+    
+</body>
+</html>

@@ -1,0 +1,316 @@
+
+import json
+import requests
+from fuzzywuzzy import fuzz
+import re
+from datetime import datetime
+
+# URLs and file paths
+positions_url = "https://data.opensanctions.org/datasets/latest/peps/pep-positions.json"
+names_url = "https://data.opensanctions.org/datasets/latest/peps/names.txt"
+local_file_path = "PEP/pep-positions-in.txt"
+india_json_file = "PEP/PEP_India.json"  # Path to your JSON file
+
+
+
+# Load JSON data from the URL
+def load_positions(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f'Error fetching data from {url}: {e}')
+        return {}
+
+# Load JSON data from a local file
+def load_local_positions(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            return file.read().splitlines()
+    except FileNotFoundError:
+        print(f'File not found: {file_path}')
+    except Exception as e:
+        print(f'Error reading the local file: {e}')
+    return []
+
+# Load the India JSON file
+def load_india_json(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return json.load(file)
+    except FileNotFoundError:
+        print(f'File not found: {file_path}')
+    except json.JSONDecodeError as e:
+        print(f'Error decoding JSON from {file_path}: {e}')
+    except Exception as e:
+        print(f'Error reading the JSON file: {e}')
+    return []
+
+# Load names data from the URL
+def load_names(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.text.splitlines()
+    except requests.RequestException as e:
+        print(f'Error fetching names from {url}: {e}')
+        return []
+
+
+def search_positions(position, threshold, dob=None,country=None):
+    try:
+        threshold = int(threshold)
+    except ValueError:
+        print(f'Invalid threshold value: {threshold}. Using default threshold of 80.')
+        threshold = 80
+    if country=='India' or country is None:
+        data = load_positions(positions_url)
+        india_data = load_india_json(india_json_file)
+        local_positions = load_local_positions(local_file_path)
+        matched_records = []
+
+        # Normalize the provided DOB to YYYY-MM-DD format
+        normalized_dob = None
+        if dob:
+            try:
+                normalized_dob = datetime.strptime(dob.split("T")[0], "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid DOB format: {dob}. Skipping DOB matching.")
+
+        # Process India JSON data
+        for record in india_data:
+            person_label = record.get("personLabel", "")
+            position_label = record.get("positionLabel", "")
+            record_dob = record.get("dob", "").split("T")[0]  # Extract only the date part
+            try:
+                record_dob_date = datetime.strptime(record_dob, "%Y-%m-%d").date()
+            except ValueError:
+                continue  # Skip  invalid DOB formats
+
+            # position and DOB matching
+            if position.lower() in position_label.lower() or position_label.lower() in position.lower():
+                score = fuzz.partial_ratio(position.lower(), position_label.lower())
+                if position.lower() != position_label.lower():
+                    if 80 <= score <= 100:
+                        score -= 10
+                if score >= threshold:
+                    # If DOB is provided, include only records with matching DOB
+                    if normalized_dob:
+                        if record_dob_date == normalized_dob:
+                            matched_records.append({
+                                "name": person_label,
+                                "dob": record_dob,
+                                "position": position_label,
+                                "score": score,
+                                "startDate": record.get("startDate", ""),
+                                "endDate": record.get("endDate", "")
+                            })
+                    else:
+                        # Include all records if DOB is not provided
+                        matched_records.append({
+                            "name": person_label,
+                            "dob": record_dob,
+                            "position": position_label,
+                            "score": score,
+                            "startDate": record.get("startDate", ""),
+                            "endDate": record.get("endDate", "")
+                        })
+
+        if not dob:
+            india_data_from_url = data.get("countries", {}).get("in", {})
+            positions = india_data_from_url.get("positions", [])
+            for record in positions:
+                for pos in record.get("names", []):
+                    if position.lower() in pos.lower() or pos.lower() in position.lower():
+                        score = fuzz.partial_ratio(position.lower(), pos.lower())
+                        if position.lower() != pos.lower():
+                            if 80 <= score <= 100:
+                                score -= 10
+                        if score >= threshold:
+                            matched_records.append({
+                                "position": pos,
+                                "record": record,
+                                "score": score
+                            })
+
+            for local_pos in local_positions:
+                if position.lower() in local_pos.lower() or local_pos.lower() in position.lower():
+                    score = fuzz.token_set_ratio(position.lower(), local_pos.lower())
+                    if position.lower() != local_pos.lower():
+                        if 80 <= score <= 100:
+                            score -= 10
+                    if score >= threshold:
+                        matched_records.append({
+                            "position": local_pos,
+                            "record": {"names": [local_pos]},  # Mock record
+                            "score": score
+                        })
+    else:
+        return []
+
+    return matched_records
+
+
+
+
+
+def search_names(name, threshold, dob=None,country=None):
+    try:
+        threshold = int(threshold)
+    except ValueError:
+        print(f'Invalid threshold value: {threshold}. Using default value of 80.')
+        threshold = 80
+
+    if country=='India' or country is None:
+
+        names_list = load_names(names_url)
+        india_data = load_india_json(india_json_file)
+        search_parts = re.split(r'\s+|\.', name.lower().strip())
+        matched_names = []
+        search_name = name.lower().strip()
+        normalized_dob = None
+
+        if dob:
+            try:
+                normalized_dob = datetime.strptime(dob.split("T")[0], "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid DOB format: {dob}. Skipping DOB matching.")
+
+        # Process India JSON data
+        for record in india_data:
+            person_label = record.get("personLabel", "")
+            position_label = record.get("positionLabel", "")
+            record_dob = record.get("dob", "").split("T")[0]
+            try:
+                record_dob_date = datetime.strptime(record_dob, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            if name.lower() in person_label.lower() or person_label.lower() in name.lower():
+                score = fuzz.partial_ratio(name.lower(), person_label.lower())
+                if name.lower() != person_label.lower():
+                    if score >= 80 and score <= 100:
+                        score -= 10
+
+                # Match by DOB if provided
+                if score >= threshold:
+                    if normalized_dob:
+                        if record_dob_date == normalized_dob:
+                            matched_names.append({
+                                "name": person_label,
+                                "dob": dob,
+                                "score": score,
+                                "Country": record.get("countryLabel", ""),
+                                "position": record.get("positionLabel", ""),
+                                "startDate": record.get("startDate", ""),
+                                "endDate": record.get("endDate", "")
+                            })
+                    else:
+                        matched_names.append({
+                            "name": person_label,
+                            "dob": record_dob,
+                            "position": position_label,
+                            "Country": record.get("countryLabel", ""),
+                            "score": score,
+                            "startDate": record.get("startDate", ""),
+                            "endDate": record.get("endDate", "")
+                        })
+
+        # Search in names from names URL
+        if not dob:  # Only proceed to names URL when DOB is not provided
+            for n in names_list:
+                fullname = n.lower().strip()
+                full_parts = re.split(r'\s+|\.', fullname)
+                if all(any(sp in fp for fp in full_parts) for sp in search_parts):
+                    dm_score = fuzz.partial_token_sort_ratio(search_name, fullname)
+                    if name != n:
+                        if 80 <= dm_score <= 100:
+                            dm_score -= 10
+                    if dm_score >= threshold:
+                        matched_names.append({
+                            "name": n, 
+                            "score": dm_score,
+                        })
+
+    else:
+        return []
+
+
+    return matched_names
+def search_name_and_position(name, position, threshold, dob=None,country=None):
+    try:
+        threshold = int(threshold)
+    except ValueError:
+        print(f'Invalid threshold value: {threshold}. Using default value of 80.')
+        threshold = 80
+
+    if country=='India' or country is None:
+
+        india_data = load_india_json(india_json_file)
+        search_name = name.lower().strip()
+        search_position = str(position).lower().strip()
+        matched_records = []
+        normalized_dob = None
+
+        if dob:
+            try:
+                normalized_dob = datetime.strptime(dob.split("T")[0], "%Y-%m-%d").date()
+            except ValueError:
+                print(f"Invalid DOB format: {dob}. Skipping DOB matching.")
+
+        # Process India JSON data
+        for record in india_data:
+            person_label = record.get("personLabel", "").lower()
+            position_label = record.get("positionLabel", "").lower()
+            record_dob = record.get("dob", "").split("T")[0]
+            try:
+                record_dob_date = datetime.strptime(record_dob, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+
+            # Check name similarity
+            name_score = fuzz.partial_ratio(search_name, person_label)
+            if search_name != person_label:
+                if 80 <= name_score <= 100:
+                    name_score -= 10
+
+            # Check position similarity
+            position_score = fuzz.partial_ratio(search_position, position_label)
+            if search_position != position_label:
+                if 80 <= position_score <= 100:
+                    position_score -= 10
+
+            # Match conditions
+            if name_score >= threshold and position_score >= threshold:
+                if normalized_dob:
+                    if record_dob_date == normalized_dob:
+                        matched_records.append({
+                            "name": record.get("personLabel", ""),
+                            "dob": record_dob,
+                            "position": record.get("positionLabel", ""),
+                            "score": name_score,
+                            #"position_score": position_score,
+                            "startDate": record.get("startDate", ""),
+                            "endDate": record.get("endDate", "")
+                        })
+                else:
+                    matched_records.append({
+                        "name": record.get("personLabel", ""),
+                        "dob": record_dob,
+                        "position": record.get("positionLabel", ""),
+                        "score": name_score,
+                        #"position_score": position_score,
+                        "startDate": record.get("startDate", ""),
+                        "endDate": record.get("endDate", "")
+                    })
+    else:
+        return []
+
+    return matched_records
+
+
+
+# Example usage
+# print(search_name_and_position("ramani","member of",70,"1952-10-15"))
+# print(search_names("mani", 50))

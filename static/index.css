@@ -1,0 +1,103 @@
+body {
+    font-family: 'Montserrat', sans-serif;
+    background-color: #E5E4E2;
+    /* background-color: #19485F;
+    color: #333; */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+}
+
+#head_image {
+    position: absolute;
+    top: 20px; 
+    left: 10px; 
+    padding: 10px; 
+}
+/**#head_image {
+    display: flex;
+    align-items: center;
+    position: relative;
+    padding: 10px 20px;
+}**/
+.logout {
+    background-color: #007BFF;
+    color: white;
+    padding: 8px 15px;
+    border-radius: 5px;
+    text-decoration: none;
+}
+
+.logout:hover {
+    background-color: #0056b3;
+}
+#head_image img {
+    width: 130px; 
+    height: auto; 
+}
+#head_image {
+    display: flex;
+    align-items: center; /* Aligns items vertically */
+    justify-content: space-between; /* Pushes logo left and logout right */
+    width: 95%;
+    padding: 10px 20px; /* Adds some spacing */
+}
+.container {
+    text-align: center;
+    background-color: #ffffff;
+    padding: 40px;
+    border-radius: 10px;
+    box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+    width: 80%;
+    max-width: 400px;
+    color: #333;
+}
+
+h1 {
+    font-size: 24px;
+    line-height: 1.5;
+    margin-bottom: 20px;
+    font-weight: 600;
+    color: #19485F;
+}
+
+button {
+    padding: 12px 20px;
+    font-size: 16px;
+    margin: 10px 0;
+    cursor: pointer;
+    background-color: #007bff;
+    border: none;
+    color: #ffffff;
+    border-radius: 5px;
+    width: 100%;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+button:hover {
+    background-color: #0056b3;
+    box-shadow: 0 6px 10px rgba(0, 0, 0, 0.15);
+}
+
+button:active {
+    background-color: #003f7f;
+    transform: scale(0.98);
+}
+footer {
+    background-color: #333;
+    color: white;
+    /* text-align: center; */
+    padding: 20px 0;
+    position: absolute;
+    left: 0;
+    bottom: -80px;
+    width: 100%;
+}
+footer >p{
+    font-size: 13px;
+    margin-left: 70px;
+}

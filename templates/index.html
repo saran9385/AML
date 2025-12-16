@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CORIZANCE</title>
+    <link rel="stylesheet" href="../static/index.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="shortcut icon" href="{{ url_for('static', filename='images/favicon.ico') }}" type="image/x-icon">
+
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="head_image">
+        <img src="{{ url_for('static', filename='images/image.png') }}" alt="Example Image">
+        <a href="/logout" class="logout">Logout</a>
+    </div>
+    <div class="container">
+        <h1>Advanced AML Screening <br>(PEP & Sanction)</h1>
+        <button onclick="window.location.href='/pep'">PEP Check</button>
+        <button onclick="window.location.href='/sanction'">Sanction Check</button>
+        <button onclick="window.location.href='/upload'">Bulk PEP and Sanction Checks</button>
+    </div>
+    <footer>
+        <p>Copyright &copy; 2025 All rights reserved.</p>
+    </footer>    
+</body>
+</html>
